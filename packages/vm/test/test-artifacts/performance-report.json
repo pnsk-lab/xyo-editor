@@ -1,0 +1,24 @@
+{
+  "generated": "2026-05-15",
+  "scenarios": {
+    "sprites": 100,
+    "blocks": 2100,
+    "listItems": 10000,
+    "monitors": 2,
+    "clones": 300,
+    "repeatedCostumeEdits": 300
+  },
+  "metricsMs": {
+    "loadMs": 101.85562800000001,
+    "normalStep60FramesMs": 165.53474999999997,
+    "turboStep120FramesMs": 165.204631,
+    "exportMs": 15.355811999999958,
+    "clone300Ms": 1878.0072680000003,
+    "repeatedCostumeEditMs": 3.8037999999996828
+  },
+  "memoryBytes": {
+    "repeatedCostumeEditHeapDelta": 0,
+    "repeatedCostumeEditHeapBefore": 9782629,
+    "repeatedCostumeEditHeapAfter": 9782629
+  }
+}

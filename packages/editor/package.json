@@ -1,0 +1,50 @@
+{
+  "name": "xyo-editor",
+  "private": false,
+  "version": "0.1.0",
+  "type": "module",
+  "module": "./dist/editor.js",
+  "types": "./dist/editor.d.ts",
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/editor.d.ts",
+      "import": "./dist/editor.js",
+      "default": "./dist/editor.js"
+    },
+    "./style.css": {
+      "default": "./dist/style.css"
+    }
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build && vp pack",
+    "pack": "vp pack",
+    "preview": "vite preview",
+    "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
+    "test:browser": "bun run build && bun test test/editor-conformance.test.ts",
+    "test:visual": "bun run build && bun test test/editor-conformance.test.ts"
+  },
+  "dependencies": {
+    "blockly": "^12.5.1",
+    "paper": "^0.12.18"
+  },
+  "devDependencies": {
+    "@hikkaku/vm": "workspace:*",
+    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@tailwindcss/vite": "^4.3.0",
+    "@tsconfig/svelte": "^5.0.8",
+    "@tsdown/css": "0.22.0",
+    "@types/node": "^24.12.3",
+    "fflate": "^0.8.2",
+    "lucide-svelte": "^1.0.1",
+    "playwright-core": "^1.60.0",
+    "svelte": "^5.55.5",
+    "svelte-check": "^4.4.8",
+    "tailwindcss": "^4.3.0",
+    "typescript": "~6.0.2",
+    "vite": "^8.0.12"
+  }
+}

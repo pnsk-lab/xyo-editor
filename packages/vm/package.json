@@ -1,0 +1,102 @@
+{
+  "name": "@hikkaku/vm",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/argument-type": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/block-type": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/target-type": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/reporter-scope": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/define-messages": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./extension-support/extension-metadata": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./scratchFetch": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./svg-renderer": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./bitmap-adapter": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./parser": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./file-uploader": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./sb-file-uploader-utils": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./util/cast": {
+      "types": "./src/util/cast.ts",
+      "default": "./src/util/cast.ts"
+    },
+    "./util/color": {
+      "types": "./src/util/color.ts",
+      "default": "./src/util/color.ts"
+    },
+    "./util/math-util": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./util/uid": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./util/get-monitor-id": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./util/clone": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    },
+    "./util/string-util": {
+      "types": "./src/index.ts",
+      "default": "./src/index.ts"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "test:compat": "bun test test/fixtures.test.ts",
+    "test:performance": "bun test ./test/performance.bench.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "~6.0.2"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2"
+  }
+}

@@ -1,0 +1,37 @@
+{
+  "generated": "2026-05-15",
+  "viewports": {
+    "mobile": {
+      "screenshotBytes": 119192,
+      "stageClientWidth": 336,
+      "stageClientHeight": 252,
+      "backingWidth": 480,
+      "backingHeight": 360,
+      "nonWhitePixels": 104405
+    },
+    "tablet": {
+      "screenshotBytes": 153107,
+      "stageClientWidth": 744,
+      "stageClientHeight": 558,
+      "backingWidth": 480,
+      "backingHeight": 360,
+      "nonWhitePixels": 104405
+    },
+    "desktop": {
+      "screenshotBytes": 124854,
+      "stageClientWidth": 335,
+      "stageClientHeight": 251.25,
+      "backingWidth": 480,
+      "backingHeight": 360,
+      "nonWhitePixels": 104405
+    },
+    "wide": {
+      "screenshotBytes": 124753,
+      "stageClientWidth": 335,
+      "stageClientHeight": 251.25,
+      "backingWidth": 480,
+      "backingHeight": 360,
+      "nonWhitePixels": 104405
+    }
+  }
+}

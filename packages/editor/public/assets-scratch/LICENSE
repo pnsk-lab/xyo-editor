@@ -1,0 +1,24 @@
+Scratch editor media assets
+
+Source:
+https://github.com/scratchfoundation/scratch-editor
+
+The asset file names in images/ and sounds/, plus the names recorded in
+asset-names.json, come from:
+contexts/scratch-editor/packages/scratch-gui/src/lib/libraries/backdrops.json
+contexts/scratch-editor/packages/scratch-gui/src/lib/libraries/costumes.json
+contexts/scratch-editor/packages/scratch-gui/src/lib/libraries/sounds.json
+contexts/scratch-editor/packages/scratch-gui/src/lib/libraries/sprites.json
+
+Source revision used:
+afcb620bd1edf87f236a7cb1d01200641312e95e
+
+Binary asset source:
+https://assets.scratch.mit.edu/internalapi/asset/<md5ext>/get
+
+License:
+These Scratch media assets are used under the Creative Commons
+Attribution-ShareAlike 2.0 Generic license (CC BY-SA 2.0).
+
+License text:
+https://creativecommons.org/licenses/by-sa/2.0/

@@ -1,0 +1,28 @@
+{
+  "name": "root",
+  "private": true,
+  "type": "module",
+  "module": "index.ts",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "bun --cwd packages/editor dev",
+    "build": "bun --cwd packages/vm build && bun --cwd packages/editor build",
+    "check": "bun --cwd packages/vm check && bun --cwd packages/editor check",
+    "test": "bun --cwd packages/vm test",
+    "test:compat": "bun --cwd packages/vm test:compat",
+    "test:performance": "bun --cwd packages/vm test:performance",
+    "test:browser": "bun --cwd packages/editor test:browser",
+    "test:visual": "bun --cwd packages/editor test:visual",
+    "fmt": "vp check --fix",
+    "lint": "vp check"
+  },
+  "dependencies": {
+    "vite-plus": "^0.1.21"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^5"
+  }
+}
