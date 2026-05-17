@@ -77,7 +77,7 @@
     type ScratchSound,
     type ScratchTarget,
   } from '@hikkaku/vm'
-  import { createEditorContext, type EditorContext, type EditorContextTab } from './lib/editor-context'
+  import { createEditorContext, type EditorContext, type EditorContextTab, type EditorHeaderConfig } from './lib/editor-context'
 
   export let context: EditorContext = createEditorContext()
 
@@ -390,9 +390,11 @@
     { id: 'sounds', label: '音', icon: Volume2 },
   ]
   let contextTabs: EditorContextTab[] = [...(context.tabs ?? [])]
+  let header: EditorHeaderConfig = context.header ?? {}
   let orderedContextTabs: Array<{ tab: EditorContextTab; index: number; order: number; id: string }> = []
   let activeContextTab: { tab: EditorContextTab; index: number; order: number; id: string } | undefined
   let unsubscribeContextTabs: (() => void) | undefined
+  let unsubscribeContextHeader: (() => void) | undefined
   $: orderedContextTabs = contextTabs
     .map((tab, index) => ({ tab, index, order: tab.order ?? 0, id: externalTabId(tab, index) }))
     .sort((a, b) => a.order - b.order || a.index - b.index)
@@ -604,6 +606,9 @@
     unsubscribeContextTabs = context.subscribeTabs?.((entries) => {
       contextTabs = entries
     })
+    unsubscribeContextHeader = context.subscribeHeader?.((nextHeader) => {
+      header = nextHeader
+    })
     applyColorScheme(preferredColorScheme())
     registerScratchBlocklyBlocks()
     mountBlockly()
@@ -624,6 +629,7 @@
 
   onDestroy(() => {
     unsubscribeContextTabs?.()
+    unsubscribeContextHeader?.()
     unsubscribers.forEach((unsubscribe) => unsubscribe())
     if (tickTimer) clearInterval(tickTimer)
     if (visualReportTimer) clearTimeout(visualReportTimer)
@@ -5291,6 +5297,7 @@
 <main class="flex h-svh overflow-hidden flex-col bg-[#f5f7fb] text-slate-800" data-color-scheme={colorScheme}>
   <AppHeader
     bind:projectTitle
+    {header}
     {status}
     {snapshot}
     openProject={openProjectPicker}

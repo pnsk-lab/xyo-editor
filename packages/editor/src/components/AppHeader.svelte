@@ -1,9 +1,11 @@
 <script lang="ts">
   import { Blocks, Bug, ChevronDown, Download, FileText, Flag, FolderOpen, Lightbulb, Moon, Pencil, Plus, Settings, Square, StepForward, Sun, Zap } from 'lucide-svelte'
   import type { RuntimeSnapshot } from '@hikkaku/vm'
+  import type { EditorHeaderButton, EditorHeaderConfig, EditorHeaderLogo } from '../lib/editor-context'
 
   let {
     projectTitle = $bindable(''),
+    header = {},
     status,
     snapshot,
     openProject,
@@ -18,6 +20,7 @@
     toggleColorScheme,
   } = $props<{
     projectTitle: string
+    header?: EditorHeaderConfig
     status: string
     snapshot: RuntimeSnapshot
     openProject: () => void
@@ -36,15 +39,61 @@
     const details = (event.currentTarget as HTMLElement).closest('details')
     details?.removeAttribute('open')
   }
+
+  function mountElement(node: HTMLElement, element: Element | undefined) {
+    let mountedElement: Element | undefined
+    const mount = (nextElement: Element | undefined) => {
+      if (!nextElement || mountedElement === nextElement) return
+      node.replaceChildren(nextElement)
+      mountedElement = nextElement
+    }
+    mount(element)
+    return {
+      update: mount,
+      destroy() {
+        node.replaceChildren()
+        mountedElement = undefined
+      },
+    }
+  }
+
+  function followHeaderAction(action: EditorHeaderButton | EditorHeaderLogo | undefined, event: MouseEvent) {
+    action?.onClick?.(event)
+  }
+
+  function headerRel(action: EditorHeaderButton | EditorHeaderLogo | undefined) {
+    if (action?.rel) return action.rel
+    return action?.target === '_blank' ? 'noreferrer' : undefined
+  }
 </script>
 
 <header class="relative z-40 flex h-[52px] shrink-0 items-center border-b border-[#774dc5] bg-[#855cd6] text-white shadow-sm">
   <div class="flex h-full min-w-max flex-1 items-center">
     <div class="flex h-full w-[108px] items-center justify-center border-r border-white/10">
-      <div class="scratch-wordmark" title={projectTitle || 'Scratch'}>
-        <Blocks size={16} aria-hidden="true" />
-        <span>SCRATCH</span>
-      </div>
+      {#if header.logo?.element}
+        {#if header.logo.href}
+          <a class="header-logo-slot" href={header.logo.href} target={header.logo.target} rel={headerRel(header.logo)} title={header.logo.title ?? projectTitle} onclick={(event) => followHeaderAction(header.logo, event)} use:mountElement={header.logo.element}></a>
+        {:else if header.logo.onClick}
+          <button class="header-logo-slot" type="button" title={header.logo.title ?? projectTitle} onclick={(event) => followHeaderAction(header.logo, event)} use:mountElement={header.logo.element}></button>
+        {:else}
+          <div class="header-logo-slot" title={header.logo.title ?? projectTitle} use:mountElement={header.logo.element}></div>
+        {/if}
+      {:else if header.logo?.href}
+        <a class="scratch-wordmark" href={header.logo.href} target={header.logo.target} rel={headerRel(header.logo)} title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'Scratch'))} onclick={(event) => followHeaderAction(header.logo, event)}>
+          <Blocks size={16} aria-hidden="true" />
+          <span>{header.logo.label ?? 'SCRATCH'}</span>
+        </a>
+      {:else if header.logo?.onClick}
+        <button class="scratch-wordmark" type="button" title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'Scratch'))} onclick={(event) => followHeaderAction(header.logo, event)}>
+          <Blocks size={16} aria-hidden="true" />
+          <span>{header.logo.label ?? 'SCRATCH'}</span>
+        </button>
+      {:else}
+        <div class="scratch-wordmark" title={header.logo?.title ?? (projectTitle || (header.logo?.label ?? 'Scratch'))}>
+          <Blocks size={16} aria-hidden="true" />
+          <span>{header.logo?.label ?? 'SCRATCH'}</span>
+        </div>
+      {/if}
     </div>
 
     <nav class="flex h-full items-center text-[13px] font-bold">
@@ -141,15 +190,69 @@
     </nav>
   </div>
 
-  <div class="flex h-full min-w-max items-center gap-7 px-5 text-[13px] font-bold">
-    <button class="header-link" type="button">Scratchに参加しよう</button>
-    <button class="header-link" type="button">サインイン</button>
-  </div>
+  {#if header.authSlot}
+    <div class="header-auth-slot" use:mountElement={header.authSlot}></div>
+  {:else}
+    <div class="flex h-full min-w-max items-center gap-7 px-5 text-[13px] font-bold">
+      {#if !header.signUp?.hidden}
+        {#if header.signUp?.element}
+          <span class="header-action-slot" use:mountElement={header.signUp.element}></span>
+        {:else if header.signUp?.href}
+          <a class="header-link" href={header.signUp.href} target={header.signUp.target} rel={headerRel(header.signUp)} aria-label={header.signUp.ariaLabel} onclick={(event) => followHeaderAction(header.signUp, event)}>
+            {header.signUp.label ?? 'Scratchに参加しよう'}
+          </a>
+        {:else}
+          <button class="header-link" type="button" aria-label={header.signUp?.ariaLabel} onclick={(event) => followHeaderAction(header.signUp, event)}>
+            {header.signUp?.label ?? 'Scratchに参加しよう'}
+          </button>
+        {/if}
+      {/if}
+      {#if !header.signIn?.hidden}
+        {#if header.signIn?.element}
+          <span class="header-action-slot" use:mountElement={header.signIn.element}></span>
+        {:else if header.signIn?.href}
+          <a class="header-link" href={header.signIn.href} target={header.signIn.target} rel={headerRel(header.signIn)} aria-label={header.signIn.ariaLabel} onclick={(event) => followHeaderAction(header.signIn, event)}>
+            {header.signIn.label ?? 'サインイン'}
+          </a>
+        {:else}
+          <button class="header-link" type="button" aria-label={header.signIn?.ariaLabel} onclick={(event) => followHeaderAction(header.signIn, event)}>
+            {header.signIn?.label ?? 'サインイン'}
+          </button>
+        {/if}
+      {/if}
+    </div>
+  {/if}
 
   <span class="sr-only" aria-live="polite">{status}</span>
 </header>
 
 <style>
+  .header-logo-slot,
+  .header-action-slot,
+  .header-auth-slot {
+    align-items: center;
+    display: inline-flex;
+  }
+
+  .header-logo-slot {
+    justify-content: center;
+    max-height: 40px;
+    max-width: 92px;
+  }
+
+  .header-logo-slot :global(img),
+  .header-logo-slot :global(svg) {
+    display: block;
+    max-height: 40px;
+    max-width: 92px;
+  }
+
+  .header-auth-slot {
+    height: 100%;
+    min-width: max-content;
+    padding: 0 20px;
+  }
+
   .scratch-wordmark {
     align-items: center;
     background: #ffffff;
