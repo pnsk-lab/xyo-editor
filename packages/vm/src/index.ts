@@ -831,6 +831,8 @@ export class ScratchVM {
   private procedureCache = new WeakMap<ScratchTarget, Map<string, ProcedureInfo | null>>()
   private hatCache = new Map<string, HatEntry[]>()
   private runtimeStepActive = false
+  private runtimeTargetsChanged = false
+  private runtimeLayerOrderDirty = false
   private greaterThanHatState = new Map<string, boolean>()
   private touchingHatState = new Map<string, boolean>()
   private extensionHatState = new Map<string, boolean>()
@@ -1061,19 +1063,36 @@ export class ScratchVM {
 
   emit<T = unknown>(event: string, payload: T, ...args: unknown[]): void {
     for (const listener of this.listeners.get(event) ?? []) listener(payload, ...args)
-    for (const alias of this.eventAliasPayloads(event, payload, args)) {
-      for (const listener of this.listeners.get(alias.event) ?? []) listener(alias.payload, ...alias.args)
+    if (this.hasEventAliasListeners(event)) {
+      for (const alias of this.eventAliasPayloads(event, payload, args)) {
+        for (const listener of this.listeners.get(alias.event) ?? []) listener(alias.payload, ...alias.args)
+      }
     }
-    if (this.shouldRenderAfterEvent(event)) this.renderer?.requestDraw?.(isRuntimeSnapshot(payload) ? payload : this.snapshot())
+    if (this.shouldRenderAfterEvent(event, payload)) this.renderer?.requestDraw?.(isRuntimeSnapshot(payload) ? payload : this.snapshot())
   }
 
   private hasEventListeners(event: string): boolean {
     return (this.listeners.get(event)?.size ?? 0) > 0
   }
 
-  private shouldRenderAfterEvent(event: string): boolean {
+  private hasEventAliasListeners(event: string): boolean {
+    const aliases: Record<string, string[]> = {
+      TARGETS_UPDATE: ['targetsUpdate'],
+      WORKSPACE_UPDATE: ['workspaceUpdate'],
+      PROJECT_LOADED: ['projectLoaded'],
+      PROJECT_CHANGED: ['projectChanged'],
+      MONITORS_UPDATE: ['monitorsUpdate'],
+      BLOCKS_NEED_UPDATE: ['blocksNeedUpdate'],
+      TARGET_WAS_CREATED: ['targetWasCreated'],
+      TARGET_WAS_REMOVED: ['targetWasRemoved'],
+    }
+    return aliases[event]?.some((alias) => this.hasEventListeners(alias)) ?? false
+  }
+
+  private shouldRenderAfterEvent(event: string, payload?: unknown): boolean {
     if (event === 'RUNTIME_DISPOSED' || event === 'RUNTIME_STEP') return false
     if (this.runtimeStepActive) return false
+    if (event === 'TARGETS_UPDATE' && isRuntimeSnapshot(payload) && payload.running) return false
     return !['PEN_CLEAR', 'PEN_STAMP', 'SOUND_PLAYED', 'SOUNDS_STOPPED', 'TEXT_TO_SPEECH', 'EXTENSION_ACTUATOR', 'EXTENSION_DISPLAY'].includes(event)
   }
 
@@ -3252,11 +3271,19 @@ export class ScratchVM {
     } finally {
       this.runtimeStepActive = false
     }
+    if (this.runtimeLayerOrderDirty) {
+      normalizeLayerOrder(this.project)
+      this.runtimeLayerOrderDirty = false
+    }
     this.threads = this.threads.filter((thread) => !thread.done)
     this.running = this.threads.length > 0
     const snapshot = this.runtimeSnapshot()
     this.renderer?.requestDraw?.(snapshot)
     this.emit('RUNTIME_STEP', snapshot)
+    if (this.runtimeTargetsChanged) {
+      this.runtimeTargetsChanged = false
+      this.emit('TARGETS_UPDATE', snapshot)
+    }
     if (hadRunnableThreads && !this.running && this.stopAllGeneration === stopAllGenerationBeforeStep) this.emit('PROJECT_RUN_STOP', snapshot)
     return snapshot
   }
@@ -3291,12 +3318,14 @@ export class ScratchVM {
     clone.cloneOf = source.id ?? source.name
     clone.layerOrder = (source.layerOrder ?? 0) + 0.5
     this.project.targets.push(clone)
-    normalizeLayerOrder(this.project)
+    if (this.runtimeStepActive) this.runtimeLayerOrderDirty = true
+    else normalizeLayerOrder(this.project)
     this.hatCache.clear()
     for (const [id, block] of Object.entries(clone.blocks)) {
       if (block.opcode === 'control_start_as_clone') this.startThread(clone, id)
     }
-    this.emit('TARGETS_UPDATE', this.snapshot())
+    if (this.runtimeStepActive) this.runtimeTargetsChanged = true
+    else this.emit('TARGETS_UPDATE', this.snapshot())
     return clone
   }
 
@@ -3305,7 +3334,8 @@ export class ScratchVM {
     this.project.targets = this.project.targets.filter((target) => target !== clone)
     this.threads = this.threads.filter((candidate) => candidate === currentThread || candidate.target !== clone)
     this.hatCache.clear()
-    this.emit('TARGETS_UPDATE', this.snapshot())
+    if (this.runtimeStepActive) this.runtimeTargetsChanged = true
+    else this.emit('TARGETS_UPDATE', this.snapshot())
   }
 
   private stepThread(thread: RuntimeThread, now: number, _delta: number): boolean {
@@ -7578,6 +7608,7 @@ function drawSnapshot(
   penLayer?: CanvasImageSource,
   pendingPenLines?: PenLine[],
 ): void {
+  context.imageSmoothingEnabled = false
   context.clearRect(0, 0, width, height)
   context.fillStyle = '#ffffff'
   context.fillRect(0, 0, width, height)
@@ -7636,8 +7667,8 @@ function drawSpriteOnly(
   const selected = selectedTargetId === sprite.id || selectedTargetId === sprite.name
   const costume = sprite.costumes[sprite.currentCostume ?? 0]
   if (!selected && !targetMayTouchStage(sprite)) return { point, radius }
-  const costumeImage = resolveCostumeImage(costume, sprite)
   if (!selected && costumeIsTransparentPlaceholder(costume)) return { point, radius }
+  const costumeImage = resolveCostumeImage(costume, sprite)
   if (costumeImage && !selected && costumeImageIsTransparent(costumeImage.image)) return { point, radius }
   context.save()
   context.translate(point.x, point.y)

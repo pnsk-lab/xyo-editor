@@ -13,7 +13,7 @@ type SoundHandler = (targetName: string, sound: ScratchSound, snapshot: RuntimeS
 type VisualReportHandler = (id: string, value: string, snapshot: RuntimeSnapshot) => void
 type WorkerCostumeImage = { assetId: string; dataFormat: string; image: ImageBitmap }
 
-const RUNTIME_WORKER_ENABLED = false
+const RUNTIME_WORKER_ENABLED = true
 
 export class RuntimeWorkerController {
   private worker?: Worker

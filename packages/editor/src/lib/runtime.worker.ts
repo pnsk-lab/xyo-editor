@@ -46,6 +46,7 @@ let frameCount = 0
 let fpsWindowStart = performance.now()
 let lastFrameTime = 0
 let frameAccumulator = 0
+let lastRuntimeSnapshotPost = 0
 const runtimeFrameInterval = 1000 / 30
 
 const resetFps = () => {
@@ -110,6 +111,11 @@ for (const event of ['PROJECT_LOADED', 'PROJECT_CHANGED', 'TARGETS_UPDATE', 'WOR
     if (applyingHostSnapshot) return
     if (event === 'RUNTIME_STEP' && snapshot.running) {
       countFrame()
+      const now = performance.now()
+      if (now - lastRuntimeSnapshotPost > 250) {
+        lastRuntimeSnapshotPost = now
+        self.postMessage({ type: 'snapshot', event, snapshot, syncId: latestHostSyncId } satisfies RuntimeWorkerEvent)
+      }
       return
     }
     const message: RuntimeWorkerEvent = { type: 'snapshot', event, snapshot, syncId: latestHostSyncId }

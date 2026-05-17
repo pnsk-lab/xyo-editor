@@ -513,7 +513,10 @@
       status = 'Project changed'
       refresh(next)
     }),
-    vm.on<RuntimeSnapshot>('TARGETS_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
+    vm.on<RuntimeSnapshot>('TARGETS_UPDATE', (next) => {
+      if (next.running && !runtimeInWorker) refreshRuntimeFrame(next)
+      else refresh(next, runtimeInWorker ? 'worker' : 'main')
+    }),
     vm.on<RuntimeSnapshot>('WORKSPACE_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('BLOCKS_NEED_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('RUNTIME_STEP', (next) => {
