@@ -461,6 +461,24 @@ describe('editor browser conformance', () => {
     expect((await sprite3DownloadPromise).suggestedFilename().endsWith('.sprite3')).toBe(true)
   }, 30000)
 
+  it('keeps Scratch-style pen transparency visible in scanline SB3 projects', async () => {
+    const currentPage = requirePage()
+    await currentPage.setViewportSize({ width: 900, height: 650 })
+    await currentPage.goto(baseUrl, { waitUntil: 'networkidle' })
+    await currentPage.getByTestId('stage-canvas').waitFor({ state: 'visible' })
+
+    await currentPage.getByTestId('project-file-input').setInputFiles(join(root, '../../..', 'ルービックキューブ.sb3'))
+    await waitForSnapshot(currentPage, (state) => spriteNames(state).includes('renderer'))
+    await currentPage.getByLabel('Green flag').click()
+    await currentPage.waitForTimeout(1200)
+
+    const metrics = await rubikTransparencyMetrics(currentPage)
+    expect(metrics.nonWhitePixels).toBeGreaterThan(12000)
+    expect(metrics.greenPixels).toBeGreaterThan(5000)
+    expect(metrics.variedGreenRatio).toBeGreaterThan(0.9)
+    expect(metrics.greenAverageDeviation).toBeGreaterThan(90)
+  }, 30000)
+
   it('preserves the first sprite workspace when loading an SB3 with the default sprite id', async () => {
     const currentPage = requirePage()
     await currentPage.setViewportSize({ width: 1280, height: 800 })
@@ -1080,6 +1098,46 @@ const stageCanvasMetrics = async (targetPage: Page): Promise<StageCanvasMetrics>
       clientHeight: rect.height,
       aspect: rect.width / Math.max(1, rect.height),
       nonWhitePixels,
+    }
+  })
+
+const rubikTransparencyMetrics = async (targetPage: Page): Promise<{
+  nonWhitePixels: number
+  greenPixels: number
+  variedGreenRatio: number
+  greenAverageDeviation: number
+}> =>
+  targetPage.getByTestId('stage-canvas').evaluate((canvas) => {
+    const stage = canvas as HTMLCanvasElement
+    const copy = document.createElement('canvas')
+    copy.width = stage.width
+    copy.height = stage.height
+    const copyContext = copy.getContext('2d')
+    if (!copyContext) throw new Error('Missing canvas readback context')
+    copyContext.drawImage(stage, 0, 0)
+    const data = copyContext.getImageData(0, 0, copy.width, copy.height).data
+    let nonWhitePixels = 0
+    let greenPixels = 0
+    let variedGreenPixels = 0
+    let greenDeviation = 0
+    for (let index = 0; index < data.length; index += 4) {
+      const red = data[index] ?? 255
+      const green = data[index + 1] ?? 255
+      const blue = data[index + 2] ?? 255
+      const alpha = data[index + 3] ?? 0
+      if (alpha > 0 && (red < 245 || green < 245 || blue < 245)) nonWhitePixels += 1
+      if (green > 120 && red < 120 && blue < 140) {
+        greenPixels += 1
+        const deviation = Math.abs(red - 34) + Math.abs(green - 197) + Math.abs(blue - 94)
+        greenDeviation += deviation
+        if (deviation > 45) variedGreenPixels += 1
+      }
+    }
+    return {
+      nonWhitePixels,
+      greenPixels,
+      variedGreenRatio: greenPixels > 0 ? variedGreenPixels / greenPixels : 0,
+      greenAverageDeviation: greenPixels > 0 ? greenDeviation / greenPixels : 0,
     }
   })
 

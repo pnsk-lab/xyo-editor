@@ -90,11 +90,11 @@
             <Plus size={17} />
             <span>新規</span>
           </button>
-          <button class="menu-item" onclick={(event) => { openProject(); closeOpenMenu(event) }}>
+          <button class="menu-item" aria-label="Open project" onclick={(event) => { openProject(); closeOpenMenu(event) }}>
             <FolderOpen size={17} />
             <span>読み込む</span>
           </button>
-          <button class="menu-item" onclick={(event) => { exportProject(); closeOpenMenu(event) }}>
+          <button class="menu-item" aria-label="Export project" onclick={(event) => { exportProject(); closeOpenMenu(event) }}>
             <Download size={17} />
             <span>JSON で保存</span>
           </button>

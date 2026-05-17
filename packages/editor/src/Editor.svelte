@@ -436,9 +436,9 @@
     }
   }
 
-  const refresh = (next = vm.snapshot(), source: 'main' | 'worker' = 'main') => {
+  const refresh = (next = vm.snapshot(), source: 'main' | 'worker' = 'main', draw = true) => {
     snapshot = next
-    requestAnimationFrame(() => renderer.requestDraw(snapshot))
+    if (draw) requestAnimationFrame(() => renderer.requestDraw(snapshot))
     if (runtimeInWorker && source === 'main' && !applyingWorkerSnapshot) runtimeWorker.sync(next)
   }
 
@@ -506,7 +506,7 @@
     vm.on<RuntimeSnapshot>('WORKSPACE_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('BLOCKS_NEED_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('RUNTIME_STEP', (next) => {
-      refresh(next)
+      refresh(next, 'main', runtimeInWorker)
       if (next.running) countRuntimeFrame()
     }),
     vm.on<RuntimeSnapshot>('PROJECT_RUN_START', (next) => {
@@ -597,7 +597,7 @@
     selectedTarget
     syncRuntimeBlockHighlights()
   }
-  $: if (stageCanvas) renderer.requestDraw(snapshot)
+  $: if (stageCanvas && (runtimeInWorker || !snapshot.running)) renderer.requestDraw(snapshot)
   $: installBrowserTestApi()
 
   onMount(() => {

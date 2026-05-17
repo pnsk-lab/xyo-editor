@@ -578,6 +578,9 @@ type ScratchCanvasHost = HTMLCanvasElement | OffscreenCanvas
 type ScratchCanvas2DContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 type ScratchCostumeImage = HTMLImageElement | ImageBitmap
 
+const SCRATCH_STAGE_WIDTH = 480
+const SCRATCH_STAGE_HEIGHT = 360
+
 export interface RendererFacade {
   attachCanvas?: (canvas: ScratchCanvasHost) => void
   resize?: (width: number, height: number) => void
@@ -5116,7 +5119,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     this.lastSnapshot = snapshot
     if (!this.canvas) return
     this.queuedDrawSnapshot = snapshot
-    this.queuedDirectPenLines = this.pendingPenClear ? this.takePendingPenFrame() : undefined
+    this.queuedDirectPenLines = undefined
     if (this.drawScheduled) return
     this.drawScheduled = true
     scheduleRendererDraw(() => {
@@ -5238,37 +5241,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     if (this.pendingPenLines.length === 0) return
     const lines = this.pendingPenLines
     this.pendingPenLines = []
-    const groups = new Map<string, { alpha: number; strokeStyle: string; lineWidth: number; lines: PenLine[] }>()
-    for (const line of lines) {
-      const alpha = bounded(1 - line.transparency / 100, 0, 1)
-      const strokeStyle = penColorToCss(line.color)
-      const lineWidth = Math.max(1, (line.size / 480) * layer.canvas.width)
-      const styleKey = `${alpha}|${strokeStyle}|${lineWidth}`
-      let group = groups.get(styleKey)
-      if (!group) {
-        group = { alpha, strokeStyle, lineWidth, lines: [] }
-        groups.set(styleKey, group)
-      }
-      group.lines.push(line)
-    }
-    layer.context.save()
-    layer.context.lineCap = 'round'
-    layer.context.lineJoin = 'round'
-    for (const group of groups.values()) {
-      layer.context.globalAlpha = group.alpha
-      layer.context.strokeStyle = group.strokeStyle
-      layer.context.lineWidth = group.lineWidth
-      layer.context.beginPath()
-      for (const line of group.lines) {
-        const start = scratchToCanvasPoint(line.x1, line.y1, layer.canvas.width, layer.canvas.height)
-        const end = scratchToCanvasPoint(line.x2, line.y2, layer.canvas.width, layer.canvas.height)
-        layer.context.moveTo(start.x, start.y)
-        if (start.x === end.x && start.y === end.y) layer.context.lineTo(end.x + 0.01, end.y)
-        else layer.context.lineTo(end.x, end.y)
-      }
-      layer.context.stroke()
-    }
-    layer.context.restore()
+    drawPenLineRuns(layer.context, layer.canvas.width, layer.canvas.height, lines)
   }
 
   private takePendingPenFrame(): PenLine[] {
@@ -5626,6 +5599,8 @@ export class ScratchCanvasRenderer implements RendererFacade {
   }
 
   private ensurePenLayer(width: number, height: number): { canvas: ScratchCanvasHost; context: ScratchCanvas2DContext } | undefined {
+    width = SCRATCH_STAGE_WIDTH
+    height = SCRATCH_STAGE_HEIGHT
     if (!this.penCanvas) {
       this.penCanvas = createCanvasHost(width, height)
       this.penContext = this.penCanvas.getContext('2d') ?? undefined
@@ -7771,42 +7746,65 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 
 function drawPenLines(context: ScratchCanvas2DContext, width: number, height: number, sprite: ScratchTarget): void {
   if (!sprite.penLines?.length) return
-  drawGroupedPenLines(context, width, height, sprite.penLines)
+  drawPenLineRuns(context, width, height, sprite.penLines)
 }
 
-function drawGroupedPenLines(context: ScratchCanvas2DContext, width: number, height: number, lines: PenLine[]): void {
+function drawPenLineRuns(context: ScratchCanvas2DContext, width: number, height: number, lines: PenLine[]): void {
   if (!lines.length) return
-  const groups = new Map<string, { alpha: number; strokeStyle: string; lineWidth: number; lines: PenLine[] }>()
+  context.save()
+  context.lineJoin = 'round'
+  let currentStyle = ''
+  let pathOpen = false
+  const strokeOpenPath = () => {
+    if (!pathOpen) return
+    context.stroke()
+    pathOpen = false
+  }
   for (const line of lines) {
     const alpha = bounded(1 - line.transparency / 100, 0, 1)
     const strokeStyle = penColorToCss(line.color)
-    const lineWidth = Math.max(1, (line.size / 480) * width)
-    const styleKey = `${alpha}|${strokeStyle}|${lineWidth}`
-    let group = groups.get(styleKey)
-    if (!group) {
-      group = { alpha, strokeStyle, lineWidth, lines: [] }
-      groups.set(styleKey, group)
+    const lineWidth = penLineWidth(line, width)
+    const lineCap: CanvasLineCap = isStationaryPenLine(line) ? 'round' : 'butt'
+    const styleKey = `${alpha}|${strokeStyle}|${lineWidth}|${lineCap}`
+    const transparent = alpha < 1 || /^rgba\(/i.test(strokeStyle)
+    const singleStroke = transparent || (line.size <= 1 && !isStationaryPenLine(line))
+    if (singleStroke || styleKey !== currentStyle) {
+      strokeOpenPath()
+      currentStyle = singleStroke ? '' : styleKey
+      context.globalAlpha = alpha
+      context.strokeStyle = strokeStyle
+      context.lineWidth = lineWidth
+      context.lineCap = lineCap
+      context.beginPath()
+      pathOpen = true
     }
-    group.lines.push(line)
+    drawPenLinePath(context, width, height, line)
+    if (singleStroke) strokeOpenPath()
   }
-  context.save()
-  context.lineCap = 'round'
-  context.lineJoin = 'round'
-  for (const group of groups.values()) {
-    context.globalAlpha = group.alpha
-    context.strokeStyle = group.strokeStyle
-    context.lineWidth = group.lineWidth
-    context.beginPath()
-    for (const line of group.lines) {
-      const start = scratchToCanvasPoint(line.x1, line.y1, width, height)
-      const end = scratchToCanvasPoint(line.x2, line.y2, width, height)
-      context.moveTo(start.x, start.y)
-      if (start.x === end.x && start.y === end.y) context.lineTo(end.x + 0.01, end.y)
-      else context.lineTo(end.x, end.y)
-    }
-    context.stroke()
-  }
+  strokeOpenPath()
   context.restore()
+}
+
+function drawGroupedPenLines(context: ScratchCanvas2DContext, width: number, height: number, lines: PenLine[]): void {
+  drawPenLineRuns(context, width, height, lines)
+}
+
+function drawPenLinePath(context: ScratchCanvas2DContext, width: number, height: number, line: PenLine): void {
+  const start = scratchToCanvasPoint(line.x1, line.y1, width, height)
+  const end = scratchToCanvasPoint(line.x2, line.y2, width, height)
+  context.moveTo(start.x, start.y)
+  if (start.x === end.x && start.y === end.y) context.lineTo(end.x + 0.01, end.y)
+  else context.lineTo(end.x, end.y)
+}
+
+function isStationaryPenLine(line: PenLine): boolean {
+  return line.x1 === line.x2 && line.y1 === line.y2
+}
+
+function penLineWidth(line: PenLine, width: number): number {
+  const scaled = (line.size / SCRATCH_STAGE_WIDTH) * width
+  if (isStationaryPenLine(line)) return Math.max(1, scaled)
+  return line.size <= 1 ? Math.max(0.75, scaled * 0.75) : Math.max(1, scaled)
 }
 
 function penColorToCss(value: unknown): string {
