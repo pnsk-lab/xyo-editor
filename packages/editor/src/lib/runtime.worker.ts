@@ -39,13 +39,14 @@ type WorkerCostumeImage = {
 
 const vm = new ScratchVM()
 const renderer = new ScratchCanvasRenderer()
-let frameTimer: ReturnType<typeof setInterval> | undefined
-let lastRuntimeStepPost = 0
+let frameTimer: ReturnType<typeof setTimeout> | number | undefined
 let applyingHostSnapshot = false
 let latestHostSyncId = 0
-const runtimeStepPostInterval = 1000
 let frameCount = 0
 let fpsWindowStart = performance.now()
+let lastFrameTime = 0
+let frameAccumulator = 0
+const runtimeFrameInterval = 1000 / 30
 
 const resetFps = () => {
   frameCount = 0
@@ -70,16 +71,38 @@ const postRuntimeSnapshot = (event: string, syncId = latestHostSyncId) => {
 
 const beginFrameTimer = () => {
   if (frameTimer) return
-  frameTimer = setInterval(() => {
-    if (vm.isRunning()) vm.step()
-  }, 1000 / 30)
+  lastFrameTime = performance.now()
+  frameAccumulator = 0
+  const step = (now = performance.now()) => {
+    if (!frameTimer) return
+    frameAccumulator += Math.max(0, now - lastFrameTime)
+    lastFrameTime = now
+    if (vm.isRunning()) {
+      while (frameAccumulator >= runtimeFrameInterval) {
+        vm.step(now)
+        frameAccumulator -= runtimeFrameInterval
+      }
+      frameTimer = scheduleRuntimeFrame(step)
+    } else {
+      stopFrameTimer()
+    }
+  }
+  frameTimer = scheduleRuntimeFrame(step)
 }
 
 const stopFrameTimer = () => {
   if (!frameTimer) return
-  clearInterval(frameTimer)
+  cancelRuntimeFrame(frameTimer)
   frameTimer = undefined
   resetFps()
+}
+
+const scheduleRuntimeFrame = (callback: (now?: number) => void): ReturnType<typeof setTimeout> | number => {
+  return setTimeout(() => callback(performance.now()), 0)
+}
+
+const cancelRuntimeFrame = (handle: ReturnType<typeof setTimeout> | number): void => {
+  clearTimeout(handle as ReturnType<typeof setTimeout>)
 }
 
 for (const event of ['PROJECT_LOADED', 'PROJECT_CHANGED', 'TARGETS_UPDATE', 'WORKSPACE_UPDATE', 'BLOCKS_NEED_UPDATE', 'RUNTIME_STEP', 'PROJECT_RUN_START', 'PROJECT_RUN_STOP'] as const) {
@@ -87,11 +110,7 @@ for (const event of ['PROJECT_LOADED', 'PROJECT_CHANGED', 'TARGETS_UPDATE', 'WOR
     if (applyingHostSnapshot) return
     if (event === 'RUNTIME_STEP' && snapshot.running) {
       countFrame()
-      const now = performance.now()
-      if (now - lastRuntimeStepPost < runtimeStepPostInterval) return
-      lastRuntimeStepPost = now
-    } else if (event === 'PROJECT_RUN_START' || event === 'PROJECT_RUN_STOP') {
-      lastRuntimeStepPost = 0
+      return
     }
     const message: RuntimeWorkerEvent = { type: 'snapshot', event, snapshot, syncId: latestHostSyncId }
     self.postMessage(message)

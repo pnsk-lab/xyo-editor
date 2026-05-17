@@ -3791,31 +3791,34 @@ export class ScratchVM {
         return null
       }
       case 'data_addtolist': {
-        const list = this.listRecord(thread.target, block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0])
-        if (list) list[1][1].push(this.inputValue(thread.target, block, 'ITEM', 'thing'))
+        const info = this.statementInfo(block)
+        const list = this.fastListValue(thread.target, info.listId)
+        if (list) list.push(info.item?.(thread.target) ?? 'thing')
         return null
       }
       case 'data_deleteoflist': {
-        const list = this.listRecord(thread.target, block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0])
+        const info = this.statementInfo(block)
+        const list = this.fastListValue(thread.target, info.listId)
         if (!list) return null
-        const index = this.inputValue(thread.target, block, 'INDEX', 1)
-        if (String(index).toLowerCase() === 'all') list[1][1] = []
+        const index = info.index?.(thread.target) ?? 1
+        if (String(index).toLowerCase() === 'all') list.length = 0
         else {
-          const resolved = listIndex(list[1][1], index)
-          if (resolved >= 0) list[1][1].splice(resolved, 1)
+          const resolved = listIndex(list, index)
+          if (resolved >= 0) list.splice(resolved, 1)
         }
         return null
       }
       case 'data_deletealloflist': {
-        const list = this.listRecord(thread.target, block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0])
-        if (list) list[1][1] = []
+        const list = this.fastListValue(thread.target, this.statementInfo(block).listId)
+        if (list) list.length = 0
         return null
       }
       case 'data_insertatlist': {
-        const list = this.listRecord(thread.target, block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0])
+        const info = this.statementInfo(block)
+        const list = this.fastListValue(thread.target, info.listId)
         if (!list) return null
-        const index = insertIndex(list[1][1], this.inputValue(thread.target, block, 'INDEX', 1))
-        list[1][1].splice(index, 0, this.inputValue(thread.target, block, 'ITEM', 'thing'))
+        const index = insertIndex(list, info.index?.(thread.target) ?? 1)
+        list.splice(index, 0, info.item?.(thread.target) ?? 'thing')
         return null
       }
       case 'data_replaceitemoflist': {
@@ -4438,6 +4441,40 @@ export class ScratchVM {
         compiled = (target) => !truthy(value(target))
         break
       }
+      case 'operator_join': {
+        const a = valueInput('STRING1', '')
+        const b = valueInput('STRING2', '')
+        compiled = (target) => `${Cast.toString(a(target))}${Cast.toString(b(target))}`
+        break
+      }
+      case 'operator_letter_of': {
+        const text = valueInput('STRING', '')
+        const index = numberInput('LETTER', 1)
+        compiled = (target) => Cast.toString(text(target))[Math.floor(index(target)) - 1] ?? ''
+        break
+      }
+      case 'operator_length': {
+        const text = valueInput('STRING', '')
+        compiled = (target) => Cast.toString(text(target)).length
+        break
+      }
+      case 'operator_contains': {
+        const text = valueInput('STRING1', '')
+        const search = valueInput('STRING2', '')
+        compiled = (target) => Cast.toString(text(target)).toLowerCase().includes(Cast.toString(search(target)).toLowerCase())
+        break
+      }
+      case 'operator_mod': {
+        const a = valueInput('NUM1', 0)
+        const b = valueInput('NUM2', 1)
+        compiled = (target) => scratchMod(a(target), b(target))
+        break
+      }
+      case 'operator_round': {
+        const value = numberInput('NUM', 0)
+        compiled = (target) => Math.round(value(target))
+        break
+      }
       case 'operator_mathop': {
         const value = numberInput('NUM', 0)
         const operator = block.fields?.OPERATOR?.[0] ?? 'abs'
@@ -4457,6 +4494,30 @@ export class ScratchVM {
           if (!list) return ''
           const index = listIndex(list, indexValue(target))
           return index >= 0 ? list[index] ?? '' : ''
+        }
+        break
+      }
+      case 'data_itemnumoflist': {
+        const id = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+        const itemValue = valueInput('ITEM', 'thing')
+        compiled = (target) => {
+          const item = String(itemValue(target))
+          const index = this.fastListValue(target, id)?.findIndex((value) => String(value) === item) ?? -1
+          return index >= 0 ? index + 1 : 0
+        }
+        break
+      }
+      case 'data_lengthoflist': {
+        const id = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+        compiled = (target) => this.fastListValue(target, id)?.length ?? 0
+        break
+      }
+      case 'data_listcontainsitem': {
+        const id = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+        const itemValue = valueInput('ITEM', 'thing')
+        compiled = (target) => {
+          const item = String(itemValue(target))
+          return this.fastListValue(target, id)?.some((value) => String(value) === item) ?? false
         }
         break
       }
@@ -4516,7 +4577,15 @@ export class ScratchVM {
     if (block.opcode === 'data_setvariableto' || block.opcode === 'data_changevariableby') {
       info.variableId = block.fields?.VARIABLE?.[1] ?? block.fields?.VARIABLE?.[0] ?? block.fields?.VARIABLE_NAME?.[0]
       info.value = this.compiledInput(block, 'VALUE', block.opcode === 'data_changevariableby' ? 1 : 0)
-    } else if (block.opcode === 'data_replaceitemoflist') {
+    } else if (block.opcode === 'data_addtolist') {
+      info.listId = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+      info.item = this.compiledInput(block, 'ITEM', 'thing')
+    } else if (block.opcode === 'data_deleteoflist') {
+      info.listId = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+      info.index = this.compiledInput(block, 'INDEX', 1)
+    } else if (block.opcode === 'data_deletealloflist') {
+      info.listId = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
+    } else if (block.opcode === 'data_insertatlist' || block.opcode === 'data_replaceitemoflist') {
       info.listId = block.fields?.LIST?.[1] ?? block.fields?.LIST?.[0] ?? block.fields?.LIST_NAME?.[0]
       info.index = this.compiledInput(block, 'INDEX', 1)
       info.item = this.compiledInput(block, 'ITEM', 'thing')
@@ -4656,6 +4725,7 @@ export class ScratchVM {
 
   private refreshMonitorValues(): void {
     for (const monitor of this.project.monitors) {
+      if (!monitor.visible) continue
       if (monitor.opcode === 'data_variable') {
         const target = this.monitorTarget(monitor)
         const variable = this.variableRecord(target, monitorIdTail(monitor.id) ?? String(monitor.params.VARIABLE ?? ''))
@@ -4964,6 +5034,9 @@ export class ScratchCanvasRenderer implements RendererFacade {
   private lastSnapshot?: RuntimeSnapshot
   private pendingPenLines: PenLine[] = []
   private pendingPenClear = false
+  private queuedDrawSnapshot?: RuntimeSnapshot
+  private queuedDirectPenLines?: PenLine[]
+  private drawScheduled = false
   private nextSkinId = 1
   private nextDrawableId = 1
   private backgroundColor: [number, number, number] = [1, 1, 1]
@@ -5042,16 +5115,32 @@ export class ScratchCanvasRenderer implements RendererFacade {
   requestDraw(snapshot: RuntimeSnapshot): void {
     this.lastSnapshot = snapshot
     if (!this.canvas) return
-    this.flushPenLayer()
+    this.queuedDrawSnapshot = snapshot
+    this.queuedDirectPenLines = this.pendingPenClear ? this.takePendingPenFrame() : undefined
+    if (this.drawScheduled) return
+    this.drawScheduled = true
+    scheduleRendererDraw(() => {
+      this.drawScheduled = false
+      this.drawQueuedSnapshot()
+    })
+  }
+
+  private drawQueuedSnapshot(): void {
+    const snapshot = this.queuedDrawSnapshot
+    if (!snapshot || !this.canvas) return
+    const directPenLines = this.queuedDirectPenLines
+    this.queuedDrawSnapshot = undefined
+    this.queuedDirectPenLines = undefined
+    if (!directPenLines) this.flushPenLayer()
     if (this.gl && this.backContext && this.backCanvas) {
       this.backCanvas.width = this.canvas.width
       this.backCanvas.height = this.canvas.height
-      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), this.penCanvas)
+      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), directPenLines ? undefined : this.penCanvas, directPenLines)
       this.presentWebGL()
       return
     }
     if (!this.context) return
-    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), this.penCanvas)
+    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), directPenLines ? undefined : this.penCanvas, directPenLines)
   }
 
   private resolveCostumeImage(costume: ScratchCostume | undefined): ScratchCostumeImage | undefined {
@@ -5149,38 +5238,44 @@ export class ScratchCanvasRenderer implements RendererFacade {
     if (this.pendingPenLines.length === 0) return
     const lines = this.pendingPenLines
     this.pendingPenLines = []
-    let currentStyle = ''
-    layer.context.save()
-    layer.context.lineCap = 'round'
-    layer.context.lineJoin = 'round'
-    let pathOpen = false
-    const strokeOpenPath = () => {
-      if (!pathOpen) return
-      layer.context.stroke()
-      pathOpen = false
-    }
+    const groups = new Map<string, { alpha: number; strokeStyle: string; lineWidth: number; lines: PenLine[] }>()
     for (const line of lines) {
       const alpha = bounded(1 - line.transparency / 100, 0, 1)
       const strokeStyle = penColorToCss(line.color)
       const lineWidth = Math.max(1, (line.size / 480) * layer.canvas.width)
       const styleKey = `${alpha}|${strokeStyle}|${lineWidth}`
-      if (styleKey !== currentStyle) {
-        strokeOpenPath()
-        currentStyle = styleKey
-        layer.context.globalAlpha = alpha
-        layer.context.strokeStyle = strokeStyle
-        layer.context.lineWidth = lineWidth
-        layer.context.beginPath()
-        pathOpen = true
+      let group = groups.get(styleKey)
+      if (!group) {
+        group = { alpha, strokeStyle, lineWidth, lines: [] }
+        groups.set(styleKey, group)
       }
-      const start = scratchToCanvasPoint(line.x1, line.y1, layer.canvas.width, layer.canvas.height)
-      const end = scratchToCanvasPoint(line.x2, line.y2, layer.canvas.width, layer.canvas.height)
-      layer.context.moveTo(start.x, start.y)
-      if (start.x === end.x && start.y === end.y) layer.context.lineTo(end.x + 0.01, end.y)
-      else layer.context.lineTo(end.x, end.y)
+      group.lines.push(line)
     }
-    strokeOpenPath()
+    layer.context.save()
+    layer.context.lineCap = 'round'
+    layer.context.lineJoin = 'round'
+    for (const group of groups.values()) {
+      layer.context.globalAlpha = group.alpha
+      layer.context.strokeStyle = group.strokeStyle
+      layer.context.lineWidth = group.lineWidth
+      layer.context.beginPath()
+      for (const line of group.lines) {
+        const start = scratchToCanvasPoint(line.x1, line.y1, layer.canvas.width, layer.canvas.height)
+        const end = scratchToCanvasPoint(line.x2, line.y2, layer.canvas.width, layer.canvas.height)
+        layer.context.moveTo(start.x, start.y)
+        if (start.x === end.x && start.y === end.y) layer.context.lineTo(end.x + 0.01, end.y)
+        else layer.context.lineTo(end.x, end.y)
+      }
+      layer.context.stroke()
+    }
     layer.context.restore()
+  }
+
+  private takePendingPenFrame(): PenLine[] {
+    const lines = this.pendingPenLines
+    this.pendingPenLines = []
+    this.pendingPenClear = false
+    return lines
   }
 
   createTextSkin(type: string, text: string, _pointsLeft = 0): number {
@@ -5625,6 +5720,9 @@ export class ScratchCanvasRenderer implements RendererFacade {
     this.penContext = undefined
     this.pendingPenLines = []
     this.pendingPenClear = false
+    this.queuedDrawSnapshot = undefined
+    this.queuedDirectPenLines = undefined
+    this.drawScheduled = false
     this.gl = undefined
     this.glProgram = undefined
     this.glTexture = undefined
@@ -5635,7 +5733,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
 
   private configureWebGL(canvas: ScratchCanvasHost): void {
     if (typeof document === 'undefined') return
-    const gl = (canvas as HTMLCanvasElement).getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: true }) as WebGLRenderingContext | null
+    const gl = canvas.getContext('webgl', { alpha: false, antialias: false, preserveDrawingBuffer: true }) as WebGLRenderingContext | null
     if (!gl) return
     const program = createTextureProgram(gl)
     const texture = gl.createTexture()
@@ -7456,6 +7554,20 @@ function createCanvasHost(width: number, height: number): ScratchCanvasHost {
   return canvas
 }
 
+function scheduleRendererDraw(callback: () => void): void {
+  const globalScope = globalThis as { window?: unknown; importScripts?: unknown }
+  const inWorker = typeof self !== 'undefined' && typeof globalScope.window === 'undefined' && typeof globalScope.importScripts === 'function'
+  if (!inWorker && typeof window === 'undefined') {
+    callback()
+    return
+  }
+  if (!inWorker && typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(callback)
+    return
+  }
+  setTimeout(callback, 0)
+}
+
 function drawSnapshot(
   context: ScratchCanvas2DContext,
   width: number,
@@ -7464,6 +7576,7 @@ function drawSnapshot(
   selectedTargetId: string,
   resolveCostumeImage: (costume: ScratchCostume | undefined) => ScratchCostumeImage | undefined = () => undefined,
   penLayer?: CanvasImageSource,
+  pendingPenLines?: PenLine[],
 ): void {
   context.clearRect(0, 0, width, height)
   context.fillStyle = '#ffffff'
@@ -7499,6 +7612,7 @@ function drawSnapshot(
   }
 
   if (penLayer) context.drawImage(penLayer, 0, 0, width, height)
+  if (pendingPenLines?.length) drawGroupedPenLines(context, width, height, pendingPenLines)
   const sprites = snapshot.project.targets
     .filter((target) => !target.isStage)
     .sort((a, b) => (a.layerOrder ?? 0) - (b.layerOrder ?? 0))
@@ -7657,18 +7771,39 @@ function compileShader(gl: WebGLRenderingContext, type: number, source: string):
 
 function drawPenLines(context: ScratchCanvas2DContext, width: number, height: number, sprite: ScratchTarget): void {
   if (!sprite.penLines?.length) return
+  drawGroupedPenLines(context, width, height, sprite.penLines)
+}
+
+function drawGroupedPenLines(context: ScratchCanvas2DContext, width: number, height: number, lines: PenLine[]): void {
+  if (!lines.length) return
+  const groups = new Map<string, { alpha: number; strokeStyle: string; lineWidth: number; lines: PenLine[] }>()
+  for (const line of lines) {
+    const alpha = bounded(1 - line.transparency / 100, 0, 1)
+    const strokeStyle = penColorToCss(line.color)
+    const lineWidth = Math.max(1, (line.size / 480) * width)
+    const styleKey = `${alpha}|${strokeStyle}|${lineWidth}`
+    let group = groups.get(styleKey)
+    if (!group) {
+      group = { alpha, strokeStyle, lineWidth, lines: [] }
+      groups.set(styleKey, group)
+    }
+    group.lines.push(line)
+  }
   context.save()
   context.lineCap = 'round'
   context.lineJoin = 'round'
-  for (const line of sprite.penLines) {
-    const start = scratchToCanvasPoint(line.x1, line.y1, width, height)
-    const end = scratchToCanvasPoint(line.x2, line.y2, width, height)
-    context.globalAlpha = bounded(1 - line.transparency / 100, 0, 1)
-    context.strokeStyle = penColorToCss(line.color)
-    context.lineWidth = Math.max(1, (line.size / 480) * width)
+  for (const group of groups.values()) {
+    context.globalAlpha = group.alpha
+    context.strokeStyle = group.strokeStyle
+    context.lineWidth = group.lineWidth
     context.beginPath()
-    context.moveTo(start.x, start.y)
-    context.lineTo(end.x, end.y)
+    for (const line of group.lines) {
+      const start = scratchToCanvasPoint(line.x1, line.y1, width, height)
+      const end = scratchToCanvasPoint(line.x2, line.y2, width, height)
+      context.moveTo(start.x, start.y)
+      if (start.x === end.x && start.y === end.y) context.lineTo(end.x + 0.01, end.y)
+      else context.lineTo(end.x, end.y)
+    }
     context.stroke()
   }
   context.restore()

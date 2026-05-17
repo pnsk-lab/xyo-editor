@@ -13,6 +13,8 @@ type SoundHandler = (targetName: string, sound: ScratchSound, snapshot: RuntimeS
 type VisualReportHandler = (id: string, value: string, snapshot: RuntimeSnapshot) => void
 type WorkerCostumeImage = { assetId: string; dataFormat: string; image: ImageBitmap }
 
+const RUNTIME_WORKER_ENABLED = false
+
 export class RuntimeWorkerController {
   private worker?: Worker
   private transferredCanvas?: HTMLCanvasElement
@@ -33,6 +35,7 @@ export class RuntimeWorkerController {
   ) {}
 
   attachCanvas(canvas: HTMLCanvasElement, snapshot: RuntimeSnapshot): boolean {
+    if (!RUNTIME_WORKER_ENABLED) return false
     if (this.initialized || this.transferredCanvas === canvas) return this.initialized
     if (!('transferControlToOffscreen' in canvas)) return false
     this.worker = new Worker(new URL('./runtime.worker.ts', import.meta.url), { type: 'module' })

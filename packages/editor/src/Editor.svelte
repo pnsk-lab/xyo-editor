@@ -77,7 +77,7 @@
     type ScratchSound,
     type ScratchTarget,
   } from '@hikkaku/vm'
-  import { createEditorContext, type EditorContext, type EditorContextTabElement } from './lib/editor-context'
+  import { createEditorContext, type EditorContext, type EditorContextTab } from './lib/editor-context'
 
   export let context: EditorContext = createEditorContext()
 
@@ -131,6 +131,7 @@
   let fpsWindowStart = typeof performance !== 'undefined' ? performance.now() : 0
   let colorScheme: 'light' | 'dark' = 'light'
   let selectedTab: EditorTab = 'code'
+  let selectedExternalTabId = ''
   let stageFullscreen = false
   let stagePaneWidth = 540
   let paintColor = '#ffab19'
@@ -388,34 +389,27 @@
     { id: 'costumes', label: 'コスチューム', icon: Paintbrush },
     { id: 'sounds', label: '音', icon: Volume2 },
   ]
-  let contextTabElements: EditorContextTabElement[] = [...(context.tabElements ?? [])]
-  let orderedContextTabElements: Array<{ entry: EditorContextTabElement; index: number; order: number }> = []
-  let unsubscribeContextTabElements: (() => void) | undefined
-  $: orderedContextTabElements = contextTabElements
-    .map((entry, index) => ({ entry, index, order: contextTabElementOrder(entry) }))
+  let contextTabs: EditorContextTab[] = [...(context.tabs ?? [])]
+  let orderedContextTabs: Array<{ tab: EditorContextTab; index: number; order: number; id: string }> = []
+  let activeContextTab: { tab: EditorContextTab; index: number; order: number; id: string } | undefined
+  let unsubscribeContextTabs: (() => void) | undefined
+  $: orderedContextTabs = contextTabs
+    .map((tab, index) => ({ tab, index, order: tab.order ?? 0, id: externalTabId(tab, index) }))
     .sort((a, b) => a.order - b.order || a.index - b.index)
+  $: activeContextTab = orderedContextTabs.find((item) => item.id === selectedExternalTabId)
 
-  function contextTabElementOrder(entry: EditorContextTabElement) {
-    return isContextTabElementDescriptor(entry) ? entry.order ?? 0 : 0
+  function externalTabId(tab: EditorContextTab, index: number) {
+    return tab.id || `external-${index}`
   }
 
-  function isContextTabElementDescriptor(entry: EditorContextTabElement): entry is { element: Element; order?: number } {
-    return !(typeof Element !== 'undefined' && entry instanceof Element)
-  }
-
-  function resolveContextTabElement(entry: EditorContextTabElement) {
-    return isContextTabElementDescriptor(entry) ? entry.element : entry
-  }
-
-  function mountContextTabElement(node: HTMLElement, entry: EditorContextTabElement) {
+  function mountElement(node: HTMLElement, element: Element) {
     let mountedElement: Element | undefined
-    const mount = (nextEntry: EditorContextTabElement) => {
-      const nextElement = resolveContextTabElement(nextEntry)
+    const mount = (nextElement: Element) => {
       if (mountedElement === nextElement) return
       node.replaceChildren(nextElement)
       mountedElement = nextElement
     }
-    mount(entry)
+    mount(element)
     return {
       update: mount,
       destroy() {
@@ -426,7 +420,20 @@
   }
 
   function selectEditorTab(tab: EditorTab) {
+    selectedExternalTabId = ''
     selectedTab = tab
+  }
+
+  function selectExternalTab(id: string) {
+    selectedExternalTabId = id
+  }
+
+  function registerExternalTab(tab: EditorContextTab) {
+    if (context.addTab) return context.addTab(tab)
+    contextTabs = [...contextTabs, tab]
+    return () => {
+      contextTabs = contextTabs.filter((entry) => entry !== tab)
+    }
   }
 
   const refresh = (next = vm.snapshot(), source: 'main' | 'worker' = 'main') => {
@@ -538,7 +545,7 @@
     costumeSelectionSignature = currentCostumeSelectionSignature
     resetCostumeEditorSelection()
   }
-  $: if (selectedTab === 'costumes' && currentCostumeModeSignature !== costumeEditModeSignature) {
+  $: if (!selectedExternalTabId && selectedTab === 'costumes' && currentCostumeModeSignature !== costumeEditModeSignature) {
     costumeEditModeSignature = currentCostumeModeSignature
     costumeEditMode = currentCostume?.dataFormat === 'svg' ? 'vector' : 'bitmap'
   }
@@ -559,13 +566,13 @@
     targetThumbnailSignature = targetListSignature
     refreshTargetThumbnails(targets)
   }
-  $: if (workspace && selectedTab === 'code' && selectedTarget && workspaceTargetId !== (selectedTarget.id ?? selectedTarget.name)) {
+  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && selectedTarget && workspaceTargetId !== (selectedTarget.id ?? selectedTarget.name)) {
     loadTargetWorkspace(selectedTarget)
   }
   $: toolboxSignature = selectedTarget
     ? makeWorkspaceToolboxSignature(selectedTarget, stage, targets, project.extensions)
     : ''
-  $: if (workspace && selectedTab === 'code' && !loadingBlockly && toolboxSignature !== workspaceToolboxSignature) {
+  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && !loadingBlockly && toolboxSignature !== workspaceToolboxSignature) {
     const toolboxCategoryName = selectedToolboxCategoryName()
     const flyoutScroll = flyoutScrollPosition()
     workspaceToolboxSignature = toolboxSignature
@@ -577,7 +584,7 @@
       renderMonitorCheckboxesInFlyout()
     })
   }
-  $: if (workspace && selectedTab === 'code' && !loadingBlockly) {
+  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && !loadingBlockly) {
     tick().then(() => {
       if (!workspace) return
       Blockly.svgResize(workspace)
@@ -585,7 +592,7 @@
       renderMonitorCheckboxesInFlyout()
     })
   }
-  $: if (workspace && selectedTab === 'code' && !loadingBlockly) {
+  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && !loadingBlockly) {
     snapshot.threads
     selectedTarget
     syncRuntimeBlockHighlights()
@@ -594,8 +601,8 @@
   $: installBrowserTestApi()
 
   onMount(() => {
-    unsubscribeContextTabElements = context.subscribeTabElements?.((entries) => {
-      contextTabElements = entries
+    unsubscribeContextTabs = context.subscribeTabs?.((entries) => {
+      contextTabs = entries
     })
     applyColorScheme(preferredColorScheme())
     registerScratchBlocklyBlocks()
@@ -616,7 +623,7 @@
   })
 
   onDestroy(() => {
-    unsubscribeContextTabElements?.()
+    unsubscribeContextTabs?.()
     unsubscribers.forEach((unsubscribe) => unsubscribe())
     if (tickTimer) clearInterval(tickTimer)
     if (visualReportTimer) clearTimeout(visualReportTimer)
@@ -687,7 +694,7 @@
     const target = vm.getStage()
     if (!target) return
     vm.selectTarget(target.name)
-    selectedTab = 'costumes'
+    selectEditorTab('costumes')
     tick().then(() => costumeFileInput.click())
   }
 
@@ -850,7 +857,7 @@
   function paintNewSprite() {
     const sprite = vm.addSprite()
     vm.selectTarget(sprite.name)
-    selectedTab = 'costumes'
+    selectEditorTab('costumes')
     status = `${sprite.name} ready to paint`
   }
 
@@ -961,7 +968,7 @@
         rotationCenterY: 180,
       })
       vm.selectTarget(target.name)
-      selectedTab = 'costumes'
+      selectEditorTab('costumes')
       status = `${item.name} backdrop added`
     } catch (error) {
       status = error instanceof Error ? error.message : 'Could not add backdrop'
@@ -976,7 +983,7 @@
     const target = vm.getStage()
     if (!target) return
     vm.selectTarget(target.name)
-    selectedTab = 'costumes'
+    selectEditorTab('costumes')
     vm.addCostume(target.name, {
       name: `backdrop${target.costumes.length + 1}`,
       dataFormat: 'svg',
@@ -1359,7 +1366,7 @@
     if (!source || !target || !costume) return
     vm.shareCostumeToTarget(index, target.id ?? target.name, source.id ?? source.name)
     vm.selectTarget(target.name)
-    selectedTab = 'costumes'
+    selectEditorTab('costumes')
     status = `${costume.name} shared to ${target.isStage ? 'Stage' : target.name}`
   }
 
@@ -1370,7 +1377,7 @@
     if (!source || !target || !sound) return
     vm.shareSoundToTarget(index, target.id ?? target.name, source.id ?? source.name)
     vm.selectTarget(target.name)
-    selectedTab = 'sounds'
+    selectEditorTab('sounds')
     status = `${sound.name} shared to ${target.isStage ? 'Stage' : target.name}`
   }
 
@@ -1380,7 +1387,7 @@
     if (!source || !target || Object.keys(source.blocks).length === 0) return
     vm.shareBlocksToTarget(source.blocks, target.id ?? target.name, source.id ?? source.name)
     vm.selectTarget(target.name)
-    selectedTab = 'code'
+    selectEditorTab('code')
     status = `Code shared to ${target.isStage ? 'Stage' : target.name}`
   }
 
@@ -4527,7 +4534,7 @@
 
   function renderMonitorCheckboxesInFlyout() {
     const flyoutWorkspace = workspace?.getFlyout()?.getWorkspace()
-    if (!flyoutWorkspace || selectedTab !== 'code') return
+    if (!flyoutWorkspace || selectedExternalTabId || selectedTab !== 'code') return
     flyoutWorkspace.getCanvas().querySelectorAll('.hikkaku-monitor-checkbox').forEach((node) => node.remove())
     const blocks = flyoutWorkspace.getTopBlocks(false) as Blockly.BlockSvg[]
     for (const block of blocks) {
@@ -4704,7 +4711,7 @@
   }
 
   function keepToolboxExpanded(preferredCategoryName?: string, forceRefresh = false) {
-    if (!workspace || selectedTab !== 'code') return
+    if (!workspace || selectedExternalTabId || selectedTab !== 'code') return
     const toolbox = workspace.getToolbox() as unknown as {
       clearSelection?: () => void
       getFlyout?: () => { isVisible?: () => boolean; setAutoClose?: (autoClose: boolean) => void } | null
@@ -4826,7 +4833,7 @@
   }
 
   function syncToolboxCategoryToFlyoutScroll() {
-    if (!workspace || selectedTab !== 'code') return
+    if (!workspace || selectedExternalTabId || selectedTab !== 'code') return
     const currentName = currentFlyoutCategoryName()
     if (!currentName || currentName === selectedToolboxCategoryName()) return
     const toolbox = workspace.getToolbox() as unknown as {
@@ -5306,18 +5313,28 @@
             {@const TabIcon = tab.icon}
             <button
               data-testid={`main-tab-${tab.id}`}
-              class={`relative -mb-px flex h-[39px] min-w-[104px] items-center justify-center gap-1.5 rounded-t-[18px] border px-4 text-sm font-bold transition-colors ${selectedTab === tab.id ? 'z-10 border-[#b8c6d8] border-b-white bg-white text-[#855cd6]' : 'border-[#b8c6d8] bg-[#d3dfef] text-[#68758a] hover:bg-[#e7eff9] hover:text-[#575e75]'}`}
-              aria-current={selectedTab === tab.id ? 'page' : undefined}
+              class={`relative -mb-px flex h-[39px] min-w-[104px] items-center justify-center gap-1.5 rounded-t-[18px] border px-4 text-sm font-bold transition-colors ${!selectedExternalTabId && selectedTab === tab.id ? 'z-10 border-[#b8c6d8] border-b-white bg-white text-[#855cd6]' : 'border-[#b8c6d8] bg-[#d3dfef] text-[#68758a] hover:bg-[#e7eff9] hover:text-[#575e75]'}`}
+              aria-current={!selectedExternalTabId && selectedTab === tab.id ? 'page' : undefined}
               on:click={() => selectEditorTab(tab.id)}
             >
               <TabIcon size={18} strokeWidth={3} aria-hidden="true" />
               <span class="truncate">{tab.label}</span>
             </button>
           {/each}
-          {#each orderedContextTabElements as item (item.entry)}
-            <span class="contents" use:mountContextTabElement={item.entry}></span>
+          {#each orderedContextTabs as item (item.tab)}
+            <button
+              data-testid={`main-tab-${item.id}`}
+              class={`relative -mb-px flex h-[39px] min-w-[104px] items-center justify-center gap-1.5 rounded-t-[18px] border px-4 text-sm font-bold transition-colors ${selectedExternalTabId === item.id ? 'z-10 border-[#b8c6d8] border-b-white bg-white text-[#855cd6]' : 'border-[#b8c6d8] bg-[#d3dfef] text-[#68758a] hover:bg-[#e7eff9] hover:text-[#575e75]'}`}
+              aria-current={selectedExternalTabId === item.id ? 'page' : undefined}
+              on:click={() => selectExternalTab(item.id)}
+            >
+              <span class="flex h-[18px] w-[18px] shrink-0 items-center justify-center [&>*]:h-[18px] [&>*]:w-[18px]" use:mountElement={item.tab.icon}></span>
+              <span class="truncate">{item.tab.label}</span>
+            </button>
           {/each}
-          <slot name="tabs" {selectedTab} selectTab={selectEditorTab}></slot>
+          <div class="hidden">
+            <slot name="tabs" registerTab={registerExternalTab} {selectedTab} selectTab={selectEditorTab}></slot>
+          </div>
         </div>
         <div class="flex items-center gap-2 pb-2">
           <input
@@ -5339,7 +5356,7 @@
       </div>
 
       <div class="flex min-h-0 flex-1 overflow-hidden border-t-0 border-[#b8c6d8] bg-white">
-        {#if selectedTab !== 'code'}
+        {#if !selectedExternalTabId && selectedTab !== 'code'}
           <AssetSidebar
             bind:selectedTab
             bind:paintColor
@@ -5397,8 +5414,8 @@
         {/if}
 
         <div class="relative min-h-0 flex-1 overflow-hidden bg-white">
-        <CodeEditor bind:host={blocklyHost} visible={selectedTab === 'code'} />
-        {#if selectedTab === 'code'}
+        <CodeEditor bind:host={blocklyHost} visible={!selectedExternalTabId && selectedTab === 'code'} />
+        {#if !selectedExternalTabId && selectedTab === 'code'}
           <button
             class="absolute bottom-0 left-0 z-30 flex h-14 w-[72px] items-center justify-center bg-[#855cd6] text-white shadow-[0_-4px_10px_rgba(0,0,0,0.14)] hover:bg-[#7447bf]"
             type="button"
@@ -5431,10 +5448,10 @@
             </button>
           </div>
         {/if}
-        {#if selectedTab === 'costumes'}
+        {#if !selectedExternalTabId && selectedTab === 'costumes'}
           <div class="absolute left-0 top-0 z-10 flex h-5 w-10 gap-1 opacity-0">
             <button data-testid="vector-shape-rect" on:click={() => (vectorShape = 'rect')}>rect</button>
-            <button data-testid="asset-tab-sounds" on:click={() => (selectedTab = 'sounds')}>sounds</button>
+            <button data-testid="asset-tab-sounds" on:click={() => selectEditorTab('sounds')}>sounds</button>
           </div>
           <div class="hidden">
             <div>
@@ -5662,7 +5679,7 @@
               {selectVectorObjectsInRect}
               {clearVectorObjectSelection}
             />
-        {:else if selectedTab === 'sounds'}
+        {:else if !selectedExternalTabId && selectedTab === 'sounds'}
           <SoundEditor
             {selectedTarget}
             {selectedSoundIndex}
@@ -5697,7 +5714,9 @@
             {endSoundTrimHandle}
             {updateSoundTrim}
           />
-        {:else if selectedTab !== 'code'}
+        {:else if activeContextTab}
+          <div class="h-full min-h-0 overflow-hidden" use:mountElement={activeContextTab.tab.content}></div>
+        {:else if !selectedExternalTabId && selectedTab !== 'code'}
           <div class="flex min-h-[28rem] items-center justify-center text-sm text-slate-500">
             Select a tab to edit assets.
           </div>

@@ -1,45 +1,46 @@
 import { ScratchVM, type VirtualMachine } from '@hikkaku/vm'
 
-export type EditorContextTabElement =
-  | Element
-  | {
-      element: Element
-      order?: number
-    }
+export type EditorContextTab = {
+  id?: string
+  icon: Element
+  label: string
+  content: Element
+  order?: number
+}
 
 export interface EditorContext {
   vm: VirtualMachine
-  tabElements?: EditorContextTabElement[]
-  addTabElement?: (entry: EditorContextTabElement) => () => void
-  subscribeTabElements?: (listener: (entries: EditorContextTabElement[]) => void) => () => void
+  tabs?: EditorContextTab[]
+  addTab?: (tab: EditorContextTab) => () => void
+  subscribeTabs?: (listener: (tabs: EditorContextTab[]) => void) => () => void
 }
 
 export function createEditorContext(): EditorContext {
-  const tabElements: EditorContextTabElement[] = []
-  const tabElementListeners = new Set<(entries: EditorContextTabElement[]) => void>()
-  const notifyTabElementListeners = () => {
-    const entries = [...tabElements]
-    for (const listener of tabElementListeners) listener(entries)
+  const tabs: EditorContextTab[] = []
+  const tabListeners = new Set<(tabs: EditorContextTab[]) => void>()
+  const notifyTabListeners = () => {
+    const entries = [...tabs]
+    for (const listener of tabListeners) listener(entries)
   }
 
   return {
     vm: new ScratchVM(),
-    tabElements,
-    addTabElement(entry) {
-      tabElements.push(entry)
-      notifyTabElementListeners()
+    tabs,
+    addTab(tab) {
+      tabs.push(tab)
+      notifyTabListeners()
       return () => {
-        const index = tabElements.indexOf(entry)
+        const index = tabs.indexOf(tab)
         if (index >= 0) {
-          tabElements.splice(index, 1)
-          notifyTabElementListeners()
+          tabs.splice(index, 1)
+          notifyTabListeners()
         }
       }
     },
-    subscribeTabElements(listener) {
-      tabElementListeners.add(listener)
-      listener([...tabElements])
-      return () => tabElementListeners.delete(listener)
+    subscribeTabs(listener) {
+      tabListeners.add(listener)
+      listener([...tabs])
+      return () => tabListeners.delete(listener)
     },
   }
 }
