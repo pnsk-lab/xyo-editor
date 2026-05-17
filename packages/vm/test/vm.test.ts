@@ -164,6 +164,25 @@ describe('ScratchVM clean-room core', () => {
     expect(vm.getTarget('Sprite1')?.x).toBe(9)
   })
 
+  it('allows motion blocks to place sprites outside the stage', () => {
+    const vm = new ScratchVM()
+    const project = createDefaultProject()
+    const sprite = project.targets[1]!
+    sprite.blocks = {
+      flag: { opcode: 'event_whenflagclicked', next: 'setX', topLevel: true },
+      setX: { opcode: 'motion_setx', parent: 'flag', next: 'setY', inputs: { X: [1, [4, '900']] } },
+      setY: { opcode: 'motion_sety', parent: 'setX', inputs: { Y: [1, [4, '-420']] } },
+    }
+
+    vm.loadProject(project)
+    vm.greenFlag()
+    vm.step()
+
+    const target = vm.getTarget('Sprite1')!
+    expect(target.x).toBe(900)
+    expect(target.y).toBe(-420)
+  })
+
   it('casts nonnumeric command inputs without corrupting target state', () => {
     const vm = new ScratchVM()
     const project = createDefaultProject()
@@ -2310,15 +2329,20 @@ describe('ScratchVM clean-room core', () => {
     const sprite = project.targets[1]!
     sprite.x = 7
     sprite.y = 8
+    sprite.variables.camera = ['camera', 42]
     sprite.variables.touchingColor = ['touchingColor', false]
     sprite.variables.spriteX = ['spriteX', 0]
+    sprite.variables.spriteCamera = ['spriteCamera', 0]
     sprite.blocks = {
       flag: { opcode: 'event_whenflagclicked', next: 'drag', topLevel: true },
       drag: { opcode: 'sensing_setdragmode', parent: 'flag', next: 'setTouching', fields: { DRAG_MODE: ['draggable'] } },
       setTouching: { opcode: 'data_setvariableto', parent: 'drag', next: 'setX', fields: { VARIABLE: ['touchingColor', 'touchingColor'] }, inputs: { VALUE: [2, 'touchingColorReporter'] } },
       touchingColorReporter: { opcode: 'sensing_touchingcolor', parent: 'setTouching', inputs: { COLOR: [1, [9, '#112233']] } },
-      setX: { opcode: 'data_setvariableto', parent: 'setTouching', fields: { VARIABLE: ['spriteX', 'spriteX'] }, inputs: { VALUE: [2, 'xOfSprite'] } },
+      setX: { opcode: 'data_setvariableto', parent: 'setTouching', next: 'setCamera', fields: { VARIABLE: ['spriteX', 'spriteX'] }, inputs: { VALUE: [2, 'xOfSprite'] } },
       xOfSprite: { opcode: 'sensing_of', parent: 'setX', fields: { PROPERTY: ['x position'], OBJECT: ['Sprite1'] } },
+      setCamera: { opcode: 'data_setvariableto', parent: 'setX', fields: { VARIABLE: ['spriteCamera', 'spriteCamera'] }, inputs: { VALUE: [2, 'cameraOfSprite'] } },
+      cameraOfSprite: { opcode: 'sensing_of', parent: 'setCamera', fields: { PROPERTY: ['camera'] }, inputs: { OBJECT: [1, 'cameraObjectMenu'] } },
+      cameraObjectMenu: { opcode: 'sensing_of_object_menu', parent: 'cameraOfSprite', shadow: true, fields: { OBJECT: ['Sprite1', 'Sprite1'] } },
     }
     const vm = new ScratchVM()
     vm.attachRenderer({
@@ -2332,6 +2356,7 @@ describe('ScratchVM clean-room core', () => {
     expect(vm.getTarget('Sprite1')?.draggable).toBe(true)
     expect(vm.getVariableValue('Sprite1', 'touchingColor')).toBe(true)
     expect(vm.getVariableValue('Sprite1', 'spriteX')).toBe(7)
+    expect(vm.getVariableValue('Sprite1', 'spriteCamera')).toBe(42)
   })
 
   it('samples across sprite bounds for touching-color sensing', () => {
@@ -2406,10 +2431,11 @@ describe('ScratchVM clean-room core', () => {
     expect(vm.getVariableValue('Sprite1', 'done')).toBe('true')
   })
 
-  it('treats stop-this-script inside a procedure as a procedure return', () => {
+  it('treats stop-this-script inside a procedure as returning from that procedure', () => {
     const project = createDefaultProject()
     const sprite = project.targets[1]!
     sprite.variables.total = ['total', 0]
+    sprite.variables.after = ['after', 0]
     sprite.blocks = {
       flag: { opcode: 'event_whenflagclicked', next: 'forever', topLevel: true },
       forever: { opcode: 'control_forever', parent: 'flag', inputs: { SUBSTACK: [2, 'callTick'] } },
@@ -2419,6 +2445,7 @@ describe('ScratchVM clean-room core', () => {
       changeTotal: { opcode: 'data_changevariableby', parent: 'definition', next: 'stopProc', fields: { VARIABLE: ['total', 'total'] }, inputs: { VALUE: [1, [4, '1']] } },
       stopProc: { opcode: 'control_stop', parent: 'changeTotal', next: 'unreachable', fields: { STOP_OPTION: ['this script', 'null'] } },
       unreachable: { opcode: 'data_changevariableby', parent: 'stopProc', fields: { VARIABLE: ['total', 'total'] }, inputs: { VALUE: [1, [4, '100']] } },
+      afterForever: { opcode: 'data_changevariableby', parent: 'forever', fields: { VARIABLE: ['after', 'after'] }, inputs: { VALUE: [1, [4, '1']] } },
     }
     const vm = new ScratchVM()
     vm.loadProject(project)
@@ -2426,7 +2453,8 @@ describe('ScratchVM clean-room core', () => {
     vm.step()
     vm.step()
     expect(vm.getVariableValue('Sprite1', 'total')).toBe(2)
-    expect(vm.snapshot().threads[0]?.currentBlockId).toBe('callTick')
+    expect(vm.getVariableValue('Sprite1', 'after')).toBe(0)
+    expect(vm.snapshot().threads).toHaveLength(1)
   })
 
   it('runs warp procedures to completion before yielding a forever loop', () => {
@@ -3095,6 +3123,96 @@ describe('ScratchVM clean-room core', () => {
     } finally {
       globalThis.Image = originalImage
     }
+  })
+
+  it('draws viewBox-only SVG costumes using their rotation center size', () => {
+    const project = createDefaultProject()
+    const sprite = project.targets[1]!
+    sprite.costumes = [{
+      name: 'button',
+      assetId: 'button',
+      md5ext: 'button.svg',
+      dataFormat: 'svg',
+      rotationCenterX: 46.5,
+      rotationCenterY: 20.5,
+    }]
+    const vm = new ScratchVM()
+    vm.loadProject(project)
+    const renderer = new ScratchCanvasRenderer()
+    const drawImageCalls: unknown[][] = []
+    const context = {
+      beginPath: () => undefined,
+      clearRect: () => undefined,
+      fillRect: () => undefined,
+      lineTo: () => undefined,
+      moveTo: () => undefined,
+      restore: () => undefined,
+      rotate: () => undefined,
+      save: () => undefined,
+      scale: () => undefined,
+      setLineDash: () => undefined,
+      stroke: () => undefined,
+      strokeRect: () => undefined,
+      translate: () => undefined,
+      drawImage: (...args: unknown[]) => drawImageCalls.push(args),
+    } as unknown as CanvasRenderingContext2D
+    const internals = renderer as unknown as {
+      canvas: HTMLCanvasElement
+      context: CanvasRenderingContext2D
+      costumeImages: Map<string, { status: 'ready'; image: HTMLImageElement }>
+    }
+    internals.canvas = { width: 480, height: 360 } as HTMLCanvasElement
+    internals.context = context
+    internals.costumeImages.set('button.svg:svg', {
+      status: 'ready',
+      image: { naturalWidth: 300, naturalHeight: 132 } as HTMLImageElement,
+    })
+
+    renderer.requestDraw(vm.snapshot())
+
+    expect(drawImageCalls[0]?.slice(1)).toEqual([-46.5, -20.5, 93, 41])
+  })
+
+  it('starts loading every costume in the snapshot before it is selected', () => {
+    const project = createDefaultProject()
+    const sprite = project.targets[1]!
+    sprite.costumes = [
+      {
+        name: 'ready',
+        assetId: 'ready',
+        md5ext: 'ready.svg',
+        dataFormat: 'svg',
+        rotationCenterX: 40,
+        rotationCenterY: 30,
+      },
+      {
+        name: 'loading',
+        assetId: 'loading',
+        md5ext: 'loading.svg',
+        dataFormat: 'svg',
+        rotationCenterX: 60,
+        rotationCenterY: 20,
+      },
+    ]
+    sprite.currentCostume = 0
+    const vm = new ScratchVM()
+    vm.loadProject(project)
+    const renderer = new ScratchCanvasRenderer()
+    const requested: string[] = []
+    const internals = renderer as unknown as {
+      costumeImages: Map<string, { status: 'loading' | 'ready'; image?: HTMLImageElement }>
+    }
+    renderer.setAssetResolver((assetId) => {
+      requested.push(assetId)
+      return new Promise(() => undefined)
+    })
+
+    renderer.requestDraw(vm.snapshot())
+
+    expect(requested).toContain('ready.svg')
+    expect(requested).toContain('loading.svg')
+    expect(internals.costumeImages.get('ready.svg:svg')?.status).toBe('loading')
+    expect(internals.costumeImages.get('loading.svg:svg')?.status).toBe('loading')
   })
 
   it('draws pen lines for hidden sprites', () => {

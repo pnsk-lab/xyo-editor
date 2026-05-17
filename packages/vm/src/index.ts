@@ -577,6 +577,8 @@ export interface WorkspaceChange {
 type ScratchCanvasHost = HTMLCanvasElement | OffscreenCanvas
 type ScratchCanvas2DContext = CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D
 type ScratchCostumeImage = HTMLImageElement | ImageBitmap
+type ResolvedCostumeImage = { image: ScratchCostumeImage; costume: ScratchCostume | undefined }
+type CostumeImageResolver = (costume: ScratchCostume | undefined, target?: ScratchTarget) => ResolvedCostumeImage | undefined
 
 const SCRATCH_STAGE_WIDTH = 480
 const SCRATCH_STAGE_HEIGHT = 360
@@ -3253,8 +3255,8 @@ export class ScratchVM {
     this.threads = this.threads.filter((thread) => !thread.done)
     this.running = this.threads.length > 0
     const snapshot = this.runtimeSnapshot()
-    if (completedDrawableFrame) this.renderer?.requestDraw?.(snapshot)
-    if (completedDrawableFrame) this.emit('RUNTIME_STEP', snapshot)
+    this.renderer?.requestDraw?.(snapshot)
+    this.emit('RUNTIME_STEP', snapshot)
     if (hadRunnableThreads && !this.running && this.stopAllGeneration === stopAllGenerationBeforeStep) this.emit('PROJECT_RUN_STOP', snapshot)
     return snapshot
   }
@@ -3287,8 +3289,9 @@ export class ScratchVM {
     clone.name = `${source.name} clone`
     clone.isClone = true
     clone.cloneOf = source.id ?? source.name
-    clone.layerOrder = this.project.targets.length
+    clone.layerOrder = (source.layerOrder ?? 0) + 0.5
     this.project.targets.push(clone)
+    normalizeLayerOrder(this.project)
     this.hatCache.clear()
     for (const [id, block] of Object.entries(clone.blocks)) {
       if (block.opcode === 'control_start_as_clone') this.startThread(clone, id)
@@ -3380,7 +3383,7 @@ export class ScratchVM {
           thread.stack.pop()
           thread.currentBlockId = thread.target.blocks[frame.blockId]?.next ?? null
         }
-        if (loopBlock?.opcode === 'control_forever' && thread.currentBlockId) return 'yield'
+        if (isLoopOpcode(loopBlock?.opcode) && thread.currentBlockId && !this.threadInWarpProcedure(thread)) return 'yield'
         continue
       }
 
@@ -4179,6 +4182,8 @@ export class ScratchVM {
         return block.fields?.TOUCHINGOBJECTMENU?.[0] ?? '_mouse_'
       case 'sensing_distancetomenu':
         return block.fields?.DISTANCETOMENU?.[0] ?? '_mouse_'
+      case 'sensing_of_object_menu':
+        return block.fields?.OBJECT?.[0] ?? '_stage_'
       case 'sensing_keyoptions':
         return block.fields?.KEY_OPTION?.[0] ?? 'space'
       case 'sensing_loudness':
@@ -5117,6 +5122,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
 
   requestDraw(snapshot: RuntimeSnapshot): void {
     this.lastSnapshot = snapshot
+    this.prefetchSnapshotCostumes(snapshot)
     if (!this.canvas) return
     this.queuedDrawSnapshot = snapshot
     this.queuedDirectPenLines = undefined
@@ -5138,22 +5144,30 @@ export class ScratchCanvasRenderer implements RendererFacade {
     if (this.gl && this.backContext && this.backCanvas) {
       this.backCanvas.width = this.canvas.width
       this.backCanvas.height = this.canvas.height
-      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), directPenLines ? undefined : this.penCanvas, directPenLines)
+      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines)
       this.presentWebGL()
       return
     }
     if (!this.context) return
-    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume) => this.resolveCostumeImage(costume), directPenLines ? undefined : this.penCanvas, directPenLines)
+    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines)
   }
 
-  private resolveCostumeImage(costume: ScratchCostume | undefined): ScratchCostumeImage | undefined {
+  private prefetchSnapshotCostumes(snapshot: RuntimeSnapshot): void {
+    for (const target of snapshot.project.targets) {
+      for (const costume of target.costumes) this.resolveCostumeImage(costume)
+    }
+  }
+
+  private resolveCostumeImage(costume: ScratchCostume | undefined, _target?: ScratchTarget): ResolvedCostumeImage | undefined {
     if (!costume || typeof Blob === 'undefined') return undefined
     const dataFormat = costume.dataFormat ?? extensionFromMd5ext(costume.md5ext) ?? ''
     const assetId = costume.md5ext ?? costume.assetId
     if (!assetId || !dataFormat) return undefined
     const key = `${assetId}:${dataFormat}`
     const cached = this.costumeImages.get(key)
-    if (cached?.status === 'ready') return cached.image
+    if (cached?.status === 'ready' && cached.image) {
+      return { image: cached.image, costume }
+    }
     if (cached) return undefined
     if (!this.assetResolver) return undefined
     this.costumeImages.set(key, { status: 'loading' })
@@ -5226,7 +5240,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const canvas = this.canvas ?? this.backCanvas
     const layer = this.ensurePenLayer(canvas?.width ?? 480, canvas?.height ?? 360)
     if (!layer) return
-    drawSpriteOnly(layer.context, layer.canvas.width, layer.canvas.height, target, (costume) => this.resolveCostumeImage(costume))
+    drawSpriteOnly(layer.context, layer.canvas.width, layer.canvas.height, target, (costume, drawable) => this.resolveCostumeImage(costume, drawable))
   }
 
   private flushPenLayer(): void {
@@ -5510,7 +5524,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const context = this.hitTestContext(canvas.width, canvas.height)
     if (!context) return true
     context.clearRect(0, 0, canvas.width, canvas.height)
-    drawSpriteOnly(context, canvas.width, canvas.height, sprite, (costume) => this.resolveCostumeImage(costume))
+    drawSpriteOnly(context, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target))
     const point = scratchToCanvasPoint(x, y, canvas.width, canvas.height)
     const sampleX = bounded(Math.floor(point.x), 0, canvas.width - 1)
     const sampleY = bounded(Math.floor(point.y), 0, canvas.height - 1)
@@ -5547,7 +5561,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const sceneContext = this.colorHitTestContext(canvas.width, canvas.height)
     if (!spriteContext || !sceneContext) return false
     spriteContext.clearRect(0, 0, canvas.width, canvas.height)
-    drawSpriteOnly(spriteContext, canvas.width, canvas.height, sprite, (costume) => this.resolveCostumeImage(costume))
+    drawSpriteOnly(spriteContext, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target))
     this.drawSnapshotWithoutTarget(sceneContext, sprite)
     for (const point of denseCollisionSamplePoints(targetBounds(sprite))) {
       const canvasPoint = scratchToCanvasPoint(point.x, point.y, canvas.width, canvas.height)
@@ -5573,7 +5587,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     }
     const canvas = this.canvas ?? this.backCanvas
     if (!canvas) return
-    drawSnapshot(context, canvas.width, canvas.height, snapshot, '', (costume) => this.resolveCostumeImage(costume), this.penCanvas)
+    drawSnapshot(context, canvas.width, canvas.height, snapshot, '', (costume, target) => this.resolveCostumeImage(costume, target), this.penCanvas)
   }
 
   private hitTestContext(width: number, height: number): ScratchCanvas2DContext | undefined {
@@ -6908,8 +6922,8 @@ function directionToPoint(target: ScratchTarget, x: number, y: number): number {
 }
 
 function clampSprite(target: ScratchTarget): void {
-  target.x = bounded(Cast.toNumber(target.x), -240, 240)
-  target.y = bounded(Cast.toNumber(target.y), -180, 180)
+  target.x = Cast.toNumber(target.x)
+  target.y = Cast.toNumber(target.y)
   target.size = bounded(target.size === undefined ? 100 : Cast.toNumber(target.size), 5, 1000)
   target.direction = normalizeDirection(target.direction === undefined ? 90 : Cast.toNumber(target.direction))
 }
@@ -6993,6 +7007,14 @@ function normalizeDirection(value: number): number {
 
 function firstSubstack(block: ScratchBlock): string | null {
   return substack(block, 'SUBSTACK')
+}
+
+function isLoopOpcode(opcode: string | undefined): boolean {
+  return opcode === 'control_forever'
+    || opcode === 'control_repeat'
+    || opcode === 'control_repeat_until'
+    || opcode === 'control_while'
+    || opcode === 'control_for_each'
 }
 
 function substack(block: ScratchBlock, name: string): string | null {
@@ -7348,6 +7370,9 @@ function targetProperty(target: ScratchTarget, property: string, stage: ScratchT
     case 'volume':
       return target.volume ?? 100
     default:
+      for (const variable of Object.values(target.variables)) {
+        if (variable[0] === property) return variable[1]
+      }
       return 0
   }
 }
@@ -7549,7 +7574,7 @@ function drawSnapshot(
   height: number,
   snapshot: RuntimeSnapshot,
   selectedTargetId: string,
-  resolveCostumeImage: (costume: ScratchCostume | undefined) => ScratchCostumeImage | undefined = () => undefined,
+  resolveCostumeImage: CostumeImageResolver = () => undefined,
   penLayer?: CanvasImageSource,
   pendingPenLines?: PenLine[],
 ): void {
@@ -7558,9 +7583,9 @@ function drawSnapshot(
   context.fillRect(0, 0, width, height)
   const stage = snapshot.project.targets.find((target) => target.isStage)
   const backdrop = stage?.costumes[stage.currentCostume ?? 0]
-  const backdropImage = resolveCostumeImage(backdrop)
+  const backdropImage = resolveCostumeImage(backdrop, stage)
   if (backdropImage) {
-    drawBackdropImage(context, backdropImage, backdrop, width, height)
+    drawBackdropImage(context, backdropImage.image, backdropImage.costume, width, height)
   }
   if (!backdropImage) {
     context.strokeStyle = '#e2e8f0'
@@ -7603,21 +7628,24 @@ function drawSpriteOnly(
   width: number,
   height: number,
   sprite: ScratchTarget,
-  resolveCostumeImage: (costume: ScratchCostume | undefined) => ScratchCostumeImage | undefined,
+  resolveCostumeImage: CostumeImageResolver,
   selectedTargetId = '',
 ): { point: { x: number; y: number }; radius: number } {
   const point = scratchToCanvasPoint(sprite.x ?? 0, sprite.y ?? 0, width, height)
   const radius = Math.max(10, Math.min(48, (sprite.size ?? 100) * 0.18))
   const selected = selectedTargetId === sprite.id || selectedTargetId === sprite.name
   const costume = sprite.costumes[sprite.currentCostume ?? 0]
-  const costumeImage = resolveCostumeImage(costume)
+  if (!selected && !targetMayTouchStage(sprite)) return { point, radius }
+  const costumeImage = resolveCostumeImage(costume, sprite)
+  if (!selected && costumeIsTransparentPlaceholder(costume)) return { point, radius }
+  if (costumeImage && !selected && costumeImageIsTransparent(costumeImage.image)) return { point, radius }
   context.save()
   context.translate(point.x, point.y)
   applySpriteTransform(context, sprite)
-  applySpriteEffects(context, sprite)
-  if (costumeImage) drawCostumeImage(context, costumeImage, costume, sprite)
+  if (spriteHasGraphicEffects(sprite)) applySpriteEffects(context, sprite)
+  if (costumeImage) drawCostumeImage(context, costumeImage.image, costumeImage.costume, sprite)
   else drawFallbackSprite(context, sprite, selected, radius)
-  if (selected) drawSelectionHalo(context, costumeImage, costume, sprite, radius)
+  if (selected) drawSelectionHalo(context, costumeImage?.image, costumeImage?.costume, sprite, radius)
   context.restore()
   return { point, radius }
 }
@@ -7628,13 +7656,14 @@ function drawBackdropImage(context: ScratchCanvas2DContext, image: ScratchCostum
   const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
   const centerX = Number(costume?.rotationCenterX)
   const centerY = Number(costume?.rotationCenterY)
-  const imageWidth = costumeImageWidth(image)
-  const imageHeight = costumeImageHeight(image)
+  const raster = rasterizedCostumeImage(image, costume)
+  const imageWidth = raster.width
+  const imageHeight = raster.height
   const x = Number.isFinite(centerX) ? 240 - centerX / bitmapResolution : 240 - imageWidth / (2 * bitmapResolution)
   const y = Number.isFinite(centerY) ? 180 - centerY / bitmapResolution : 180 - imageHeight / (2 * bitmapResolution)
   context.save()
   context.scale(scaleX, scaleY)
-  context.drawImage(image, x, y, imageWidth / bitmapResolution, imageHeight / bitmapResolution)
+  context.drawImage(raster.image, x, y, imageWidth / bitmapResolution, imageHeight / bitmapResolution)
   context.restore()
 }
 
@@ -7645,9 +7674,11 @@ function drawCostumeImage(context: ScratchCanvas2DContext, image: ScratchCostume
   context.scale(scale, scale)
   const centerX = Number(costume?.rotationCenterX)
   const centerY = Number(costume?.rotationCenterY)
-  const x = Number.isFinite(centerX) ? -centerX : -costumeImageWidth(image) / 2
-  const y = Number.isFinite(centerY) ? -centerY : -costumeImageHeight(image) / 2
-  context.drawImage(image, x, y)
+  const raster = rasterizedCostumeImage(image, costume)
+  const { width, height } = raster
+  const x = Number.isFinite(centerX) ? -centerX : -width / 2
+  const y = Number.isFinite(centerY) ? -centerY : -height / 2
+  context.drawImage(raster.image, x, y, width, height)
   context.restore()
 }
 
@@ -7678,8 +7709,7 @@ function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostum
   if (image) {
     const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
     const scale = ((sprite.size ?? 100) / 100) / bitmapResolution
-    const imageWidth = costumeImageWidth(image)
-    const imageHeight = costumeImageHeight(image)
+    const { width: imageWidth, height: imageHeight } = costumeImageSize(image, costume)
     const centerX = Number.isFinite(Number(costume?.rotationCenterX)) ? Number(costume?.rotationCenterX) : imageWidth / 2
     const centerY = Number.isFinite(Number(costume?.rotationCenterY)) ? Number(costume?.rotationCenterY) : imageHeight / 2
     context.strokeRect(-centerX * scale, -centerY * scale, imageWidth * scale, imageHeight * scale)
@@ -7691,12 +7721,93 @@ function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostum
   context.restore()
 }
 
+function targetMayTouchStage(target: ScratchTarget): boolean {
+  const bounds = targetBounds(target)
+  return bounds.right >= -260 && bounds.left <= 260 && bounds.top >= -200 && bounds.bottom <= 200
+}
+
 function costumeImageWidth(image: ScratchCostumeImage): number {
   return 'naturalWidth' in image ? image.naturalWidth : image.width
 }
 
 function costumeImageHeight(image: ScratchCostumeImage): number {
   return 'naturalHeight' in image ? image.naturalHeight : image.height
+}
+
+function costumeIsTransparentPlaceholder(costume: ScratchCostume | undefined): boolean {
+  if (!costume) return false
+  const isSvg = costume.dataFormat === 'svg' || costume.md5ext?.endsWith('.svg') === true
+  return isSvg
+    && costume.name.trim().toLowerCase() === 'blank'
+    && Number(costume.rotationCenterX) === 0
+    && Number(costume.rotationCenterY) === 0
+}
+
+const transparentCostumeImages = new WeakMap<ScratchCostumeImage, boolean>()
+const rasterizedCostumeImages = new WeakMap<ScratchCostumeImage, { image: ScratchCanvasHost; width: number; height: number }>()
+
+function rasterizedCostumeImage(image: ScratchCostumeImage, costume: ScratchCostume | undefined): { image: CanvasImageSource; width: number; height: number } {
+  const { width, height } = costumeImageSize(image, costume)
+  const isSvg = costume?.dataFormat === 'svg' || costume?.md5ext?.endsWith('.svg') === true
+  if (!isSvg || width <= 0 || height <= 0 || (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined')) return { image, width, height }
+  const cached = rasterizedCostumeImages.get(image)
+  if (cached && cached.width === width && cached.height === height) return cached
+  try {
+    const canvas = createCanvasHost(width, height)
+    const context = canvas.getContext('2d')
+    if (!context) return { image, width, height }
+    context.clearRect(0, 0, width, height)
+    context.drawImage(image, 0, 0, width, height)
+    const raster = { image: canvas, width, height }
+    rasterizedCostumeImages.set(image, raster)
+    return raster
+  } catch {
+    return { image, width, height }
+  }
+}
+
+function costumeImageIsTransparent(image: ScratchCostumeImage): boolean {
+  const cached = transparentCostumeImages.get(image)
+  if (cached !== undefined) return cached
+  if (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined') {
+    transparentCostumeImages.set(image, false)
+    return false
+  }
+  try {
+    const canvas = createCanvasHost(8, 8)
+    const context = canvas.getContext('2d')
+    if (!context) {
+      transparentCostumeImages.set(image, false)
+      return false
+    }
+    context.clearRect(0, 0, 8, 8)
+    context.drawImage(image, 0, 0, 8, 8)
+    const pixels = context.getImageData(0, 0, 8, 8).data
+    for (let i = 3; i < pixels.length; i += 4) {
+      if (pixels[i] !== 0) {
+        transparentCostumeImages.set(image, false)
+        return false
+      }
+    }
+    transparentCostumeImages.set(image, true)
+    return true
+  } catch {
+    transparentCostumeImages.set(image, false)
+    return false
+  }
+}
+
+function costumeImageSize(image: ScratchCostumeImage, costume: ScratchCostume | undefined): { width: number; height: number } {
+  let width = costumeImageWidth(image)
+  let height = costumeImageHeight(image)
+  const centerX = Number(costume?.rotationCenterX)
+  const centerY = Number(costume?.rotationCenterY)
+  const isSvg = costume?.dataFormat === 'svg' || costume?.md5ext?.endsWith('.svg')
+  if (isSvg && width === 300 && Number.isFinite(centerX) && centerX > 0) {
+    if (Number.isFinite(centerX) && centerX > 0) width = centerX * 2
+    if (Number.isFinite(centerY) && centerY > 0) height = centerY * 2
+  }
+  return { width, height }
 }
 
 function createTextureProgram(gl: WebGLRenderingContext): WebGLProgram | undefined {
@@ -7838,6 +7949,11 @@ function applySpriteEffects(context: ScratchCanvas2DContext, sprite: ScratchTarg
   const brightness = bounded(Number(effects.brightness) || 0, -100, 100)
   context.globalAlpha = bounded(1 - ghost / 100, 0, 1)
   context.filter = brightness === 0 ? 'none' : `brightness(${bounded(100 + brightness, 0, 200)}%)`
+}
+
+function spriteHasGraphicEffects(sprite: ScratchTarget): boolean {
+  const effects = sprite.effects
+  return !!effects && ((Number(effects.ghost) || 0) !== 0 || (Number(effects.brightness) || 0) !== 0)
 }
 
 function spriteFillColor(sprite: ScratchTarget, selected: boolean): string {

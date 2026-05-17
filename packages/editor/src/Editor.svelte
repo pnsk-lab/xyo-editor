@@ -129,6 +129,7 @@
   let fps = 0
   let fpsFrameCount = 0
   let fpsWindowStart = typeof performance !== 'undefined' ? performance.now() : 0
+  let runtimeUiRefreshAt = 0
   let colorScheme: 'light' | 'dark' = 'light'
   let selectedTab: EditorTab = 'code'
   let selectedExternalTabId = ''
@@ -444,6 +445,14 @@
     if (runtimeInWorker && source === 'main' && !applyingWorkerSnapshot) runtimeWorker.sync(next)
   }
 
+  const refreshRuntimeFrame = (next: RuntimeSnapshot) => {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    if (!next.running || now - runtimeUiRefreshAt > 250) {
+      runtimeUiRefreshAt = now
+      snapshot = next
+    }
+  }
+
   function resetFps() {
     fps = 0
     fpsFrameCount = 0
@@ -508,7 +517,8 @@
     vm.on<RuntimeSnapshot>('WORKSPACE_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('BLOCKS_NEED_UPDATE', (next) => refresh(next, runtimeInWorker ? 'worker' : 'main')),
     vm.on<RuntimeSnapshot>('RUNTIME_STEP', (next) => {
-      refresh(next, 'main', runtimeInWorker)
+      if (runtimeInWorker) refresh(next, 'main', false)
+      else refreshRuntimeFrame(next)
       if (next.running) countRuntimeFrame()
     }),
     vm.on<RuntimeSnapshot>('PROJECT_RUN_START', (next) => {
