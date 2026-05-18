@@ -183,6 +183,29 @@ describe('ScratchVM clean-room core', () => {
     expect(target.y).toBe(-420)
   })
 
+  it('keeps sprites on stage after if-on-edge-bounce', () => {
+    const vm = new ScratchVM()
+    const project = createDefaultProject()
+    const sprite = project.targets[1]!
+    sprite.x = 360
+    sprite.y = 0
+    sprite.direction = 90
+    sprite.costumes = [{ name: 'box', dataFormat: 'svg', rotationCenterX: 48, rotationCenterY: 48 }]
+    sprite.blocks = {
+      flag: { opcode: 'event_whenflagclicked', next: 'bounce', topLevel: true },
+      bounce: { opcode: 'motion_ifonedgebounce', parent: 'flag' },
+    }
+
+    vm.loadProject(project)
+    vm.greenFlag()
+    vm.step()
+
+    const target = vm.getTarget('Sprite1')!
+    expect(target.direction).toBe(-90)
+    expect(target.x).toBeLessThanOrEqual(192)
+    expect(target.x).toBeGreaterThanOrEqual(-192)
+  })
+
   it('casts nonnumeric command inputs without corrupting target state', () => {
     const vm = new ScratchVM()
     const project = createDefaultProject()

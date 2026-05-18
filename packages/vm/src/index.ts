@@ -6934,15 +6934,33 @@ function moveSteps(target: ScratchTarget, steps: number): void {
 }
 
 function bounceIfOnEdge(target: ScratchTarget): void {
-  const radius = hitRadius(target)
-  const onHorizontal = Math.abs(target.x ?? 0) + radius >= 240
-  const onVertical = Math.abs(target.y ?? 0) + radius >= 180
+  const bounds = targetBounds(target)
+  const onHorizontal = bounds.left <= -240 || bounds.right >= 240
+  const onVertical = bounds.bottom <= -180 || bounds.top >= 180
   if (!onHorizontal && !onVertical) return
   let direction = target.direction ?? 90
   if (onHorizontal) direction = -direction
   if (onVertical) direction = 180 - direction
   target.direction = normalizeDirection(direction)
   clampSprite(target)
+  fenceSpriteOnStage(target)
+}
+
+function fenceSpriteOnStage(target: ScratchTarget): void {
+  const bounds = targetBounds(target)
+  if (bounds.width <= SCRATCH_STAGE_WIDTH) {
+    if (bounds.left < -240) target.x = (target.x ?? 0) + (-240 - bounds.left)
+    if (bounds.right > 240) target.x = (target.x ?? 0) - (bounds.right - 240)
+  } else {
+    target.x = bounded(target.x ?? 0, -240, 240)
+  }
+  const updatedBounds = targetBounds(target)
+  if (updatedBounds.height <= SCRATCH_STAGE_HEIGHT) {
+    if (updatedBounds.bottom < -180) target.y = (target.y ?? 0) + (-180 - updatedBounds.bottom)
+    if (updatedBounds.top > 180) target.y = (target.y ?? 0) - (updatedBounds.top - 180)
+  } else {
+    target.y = bounded(target.y ?? 0, -180, 180)
+  }
 }
 
 function directionToPoint(target: ScratchTarget, x: number, y: number): number {
