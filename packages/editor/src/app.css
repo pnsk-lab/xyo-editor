@@ -71,7 +71,18 @@ body {
 }
 
 .stage-pane-resizer {
+  display: none;
   touch-action: none;
+}
+
+@media (min-width: 1024px) {
+  .stage-pane-resizer {
+    display: block;
+  }
+}
+
+.stage-pane-resizer.stage-pane-resizer--hidden {
+  display: none;
 }
 
 .stage-pane-resizer::before {

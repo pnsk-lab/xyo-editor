@@ -5746,7 +5746,7 @@
     </section>
 
     <button
-      class={`stage-pane-resizer hidden min-h-0 w-2 cursor-col-resize border-x border-[#b8c6d8] bg-[#d7e5f6] transition-colors hover:bg-[#b8d3f5] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#855cd6] lg:block ${stageFullscreen ? 'lg:hidden' : ''}`}
+      class={`stage-pane-resizer min-h-0 w-2 cursor-col-resize border-x border-[#b8c6d8] bg-[#d7e5f6] transition-colors hover:bg-[#b8d3f5] focus:outline-none focus:ring-2 focus:ring-inset focus:ring-[#855cd6] ${stageFullscreen ? 'stage-pane-resizer--hidden' : ''}`}
       type="button"
       aria-label="Resize stage pane"
       title="Resize stage pane"
