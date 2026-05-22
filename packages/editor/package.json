@@ -20,7 +20,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build && vp pack",
+    "build": "vite build && vp pack && cp src/lib/runtime.worker.ts dist/runtime.worker.ts",
     "pack": "vp pack",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",

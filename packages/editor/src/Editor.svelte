@@ -29,6 +29,7 @@
     optionalSvgNumber,
     setVectorNumericAttribute,
     setVectorRotation,
+    vectorObjectBounds,
     vectorObjectRotation,
   } from './features/costumes/vector-svg'
   import {
@@ -90,7 +91,7 @@
       ? next
       : { ...next, selectedTargetId: snapshot.selectedTargetId }
     applyingWorkerSnapshot = true
-    vm.applyRuntimeSnapshot(merged)
+    vm.applyRuntimeSnapshot(merged, { cloneProject: false })
     applyingWorkerSnapshot = false
     refresh(merged, 'worker')
     return merged
@@ -132,7 +133,7 @@
   let runtimeUiRefreshAt = 0
   let colorScheme: 'light' | 'dark' = 'light'
   let selectedTab: EditorTab = 'code'
-  let selectedExternalTabId = ''
+  let selectedExternalTabId = context.tabs?.[0]?.id ?? ''
   let stageFullscreen = false
   let stagePaneWidth = 540
   let paintColor = '#ffab19'
@@ -166,6 +167,7 @@
   const BITMAP_WORKSPACE_SCALE = 5
   const BITMAP_WORKSPACE_WIDTH = BITMAP_STANDARD_WIDTH * BITMAP_WORKSPACE_SCALE
   const BITMAP_WORKSPACE_HEIGHT = BITMAP_STANDARD_HEIGHT * BITMAP_WORKSPACE_SCALE
+  const LARGE_WORKSPACE_BLOCK_LIMIT = 800
   let bitmapCanvas: HTMLCanvasElement
   let bitmapCanvasWidth = BITMAP_WORKSPACE_WIDTH
   let bitmapCanvasHeight = BITMAP_WORKSPACE_HEIGHT
@@ -316,6 +318,8 @@
   let loadingBlockly = false
   let workspaceLoadSerial = 0
   let workspaceTargetId = ''
+  let deferredBlocklyTargetId = ''
+  let forcedBlocklyTargetIds = new Set<string>()
   let workspaceToolboxSignature = ''
   let lastToolboxScrollCategoryName = ''
   let toolboxFlyoutScrollAnimation: number | undefined
@@ -441,7 +445,7 @@
 
   const refresh = (next = vm.snapshot(), source: 'main' | 'worker' = 'main', draw = true) => {
     snapshot = next
-    if (draw) requestAnimationFrame(() => renderer.requestDraw(snapshot))
+    if (draw && !runtimeInWorker) requestAnimationFrame(() => renderer.requestDraw(snapshot))
     if (runtimeInWorker && source === 'main' && !applyingWorkerSnapshot) runtimeWorker.sync(next)
   }
 
@@ -507,6 +511,8 @@
     vm.on<RuntimeSnapshot>('PROJECT_LOADED', (next) => {
       status = 'Project loaded'
       workspaceTargetId = ''
+      deferredBlocklyTargetId = ''
+      forcedBlocklyTargetIds = new Set()
       refresh(next)
     }),
     vm.on<RuntimeSnapshot>('PROJECT_CHANGED', (next) => {
@@ -581,8 +587,8 @@
     targetThumbnailSignature = targetListSignature
     refreshTargetThumbnails(targets)
   }
-  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && selectedTarget && workspaceTargetId !== (selectedTarget.id ?? selectedTarget.name)) {
-    loadTargetWorkspace(selectedTarget)
+  $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && selectedTarget) {
+    syncSelectedTargetWorkspace(selectedTarget)
   }
   $: toolboxSignature = selectedTarget
     ? makeWorkspaceToolboxSignature(selectedTarget, stage, targets, project.extensions)
@@ -612,12 +618,13 @@
     selectedTarget
     syncRuntimeBlockHighlights()
   }
-  $: if (stageCanvas && (runtimeInWorker || !snapshot.running)) renderer.requestDraw(snapshot)
+  $: if (stageCanvas && !runtimeInWorker && !snapshot.running) renderer.requestDraw(snapshot)
   $: installBrowserTestApi()
 
   onMount(() => {
     unsubscribeContextTabs = context.subscribeTabs?.((entries) => {
       contextTabs = entries
+      if (!selectedExternalTabId && selectedTab === 'code') selectedExternalTabId = entries[0]?.id ?? ''
     })
     unsubscribeContextHeader = context.subscribeHeader?.((nextHeader) => {
       header = nextHeader
@@ -2179,12 +2186,9 @@
       text: vectorText,
     })
     const svg = await svgWithInsertedShape(selectedTarget, index, shape, 'append')
-    await vm.updateCostume(selectedTarget.name, index, {
-      dataFormat: 'svg',
-      rotationCenterX: 240,
-      rotationCenterY: 180,
-    }, new TextEncoder().encode(svg))
+    await updateVectorCostumeFromEditor(selectedTarget, index, svg)
     vectorObjects = await paperVectorObjectList(svg)
+    await refreshCostumePreview(vm.getTarget(selectedTarget.name) ?? selectedTarget)
     selectedVectorObjectIndex = vectorObjects.at(-1)?.index ?? selectedVectorObjectIndex
     selectedVectorObjectIndices = selectedVectorObjectIndex >= 0 ? [selectedVectorObjectIndex] : []
     status = 'Vector costume saved'
@@ -2200,8 +2204,9 @@
     const path = await vectorBrushPathData(points, strokeColor, strokeWidth)
     const shape = `${paint.defs}${vectorBrushMarkup({ path, strokeColor, strokeWidth, opacity: vectorOpacity })}`
     const svg = await svgWithInsertedShape(selectedTarget, index, shape, 'append')
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(svg))
+    await updateVectorCostumeFromEditor(selectedTarget, index, svg)
     vectorObjects = await paperVectorObjectList(svg)
+    await refreshCostumePreview(vm.getTarget(selectedTarget.name) ?? selectedTarget)
     selectedVectorObjectIndex = vectorObjects.at(-1)?.index ?? selectedVectorObjectIndex
     selectedVectorObjectIndices = selectedVectorObjectIndex >= 0 ? [selectedVectorObjectIndex] : []
     status = 'Vector brush stroke saved'
@@ -2216,8 +2221,9 @@
     const paint = vectorPaintStyle(width, height)
     const markup = vectorShapeInRectMarkup({ shape, rect, paint, strokeColor, strokeWidth, opacity: vectorOpacity })
     const svg = await svgWithInsertedShape(selectedTarget, index, markup, 'append')
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(svg))
+    await updateVectorCostumeFromEditor(selectedTarget, index, svg)
     vectorObjects = await paperVectorObjectList(svg)
+    await refreshCostumePreview(vm.getTarget(selectedTarget.name) ?? selectedTarget)
     selectedVectorObjectIndex = vectorObjects.at(-1)?.index ?? selectedVectorObjectIndex
     selectedVectorObjectIndices = selectedVectorObjectIndex >= 0 ? [selectedVectorObjectIndex] : []
     status = 'Vector shape saved'
@@ -2252,6 +2258,68 @@
         : existing.replace(/<\/svg\s*>/i, `${shape}</svg>`)
     }
     return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">${shape}</svg>`
+  }
+
+  function vectorRuntimeCostume(svgText: string, target: ScratchTarget, index: number) {
+    const costume = target.costumes[index]
+    if (target.isStage) {
+      return {
+        svgText,
+        patch: {
+          dataFormat: 'svg',
+          rotationCenterX: 240,
+          rotationCenterY: 180,
+        },
+      }
+    }
+
+    const doc = new DOMParser().parseFromString(svgText, 'image/svg+xml')
+    const svg = doc.documentElement
+    if (svg.nodeName.toLowerCase() !== 'svg') {
+      return {
+        svgText,
+        patch: {
+          dataFormat: 'svg',
+          bitmapResolution: 1,
+          rotationCenterX: costume?.rotationCenterX ?? 48,
+          rotationCenterY: costume?.rotationCenterY ?? 50,
+        },
+      }
+    }
+
+    const bounds = editableSvgChildren(svg)
+      .map((child) => vectorObjectBounds(child))
+      .filter((bound) => bound.width > 0 || bound.height > 0)
+    const stageCenterX = 240
+    const stageCenterY = 180
+    const left = bounds.length > 0 ? Math.floor(Math.min(...bounds.map((bound) => bound.x)) - 2) : stageCenterX - 48
+    const top = bounds.length > 0 ? Math.floor(Math.min(...bounds.map((bound) => bound.y)) - 2) : stageCenterY - 50
+    const right = bounds.length > 0 ? Math.ceil(Math.max(...bounds.map((bound) => bound.x + bound.width)) + 2) : left + 96
+    const bottom = bounds.length > 0 ? Math.ceil(Math.max(...bounds.map((bound) => bound.y + bound.height)) + 2) : top + 100
+    const width = Math.max(1, right - left)
+    const height = Math.max(1, bottom - top)
+    svg.setAttribute('width', String(width))
+    svg.setAttribute('height', String(height))
+    svg.setAttribute('viewBox', `${left} ${top} ${width} ${height}`)
+    const rotationCenterX = stageCenterX - left
+    const rotationCenterY = stageCenterY - top
+    return {
+      svgText: new XMLSerializer().serializeToString(svg),
+      patch: {
+        dataFormat: 'svg',
+        bitmapResolution: 1,
+        rotationCenterX,
+        rotationCenterY,
+        width,
+        height,
+      } as Partial<ScratchCostume> & { width: number; height: number },
+    }
+  }
+
+  async function updateVectorCostumeFromEditor(target: ScratchTarget, index: number, svgText: string) {
+    const runtime = vectorRuntimeCostume(svgText, target, index)
+    await vm.updateCostume(target.name, index, runtime.patch, new TextEncoder().encode(runtime.svgText))
+    return runtime.svgText
   }
 
   function vectorPaintStyle(width: number, height: number) {
@@ -2379,8 +2447,7 @@
         if (child) await moveVectorElementBy(child, action === 'left' ? -step : action === 'right' ? step : 0, action === 'up' ? -step : action === 'down' ? step : 0)
       }
     }
-    const nextSvg = new XMLSerializer().serializeToString(doc.documentElement)
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(nextSvg))
+    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, index, new XMLSerializer().serializeToString(doc.documentElement))
     vectorObjects = await paperVectorObjectList(nextSvg)
     await refreshCostumePreview(vm.getTarget(selectedTarget.name) ?? selectedTarget)
     status = 'Vector object edited'
@@ -2533,8 +2600,7 @@
     const element = editableSvgChildren(svg)[objectIndex]
     if (!element) return
     await resizeVectorElementBy(element, handle, dx, dy)
-    const nextSvg = new XMLSerializer().serializeToString(doc.documentElement)
-    await vm.updateCostume(source.targetName, source.costumeIndex, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(nextSvg))
+    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, source.costumeIndex, new XMLSerializer().serializeToString(doc.documentElement))
     vectorObjects = await paperVectorObjectList(nextSvg)
     selectedVectorObjectIndex = objectIndex
     selectedVectorObjectIndices = [objectIndex]
@@ -2865,8 +2931,7 @@
     if (!element) return
     if (captureHistory) await captureCostumeHistory(selectedTarget, index)
     await mutator(element)
-    const nextSvg = new XMLSerializer().serializeToString(doc.documentElement)
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(nextSvg))
+    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, index, new XMLSerializer().serializeToString(doc.documentElement))
     vectorObjects = await paperVectorObjectList(nextSvg)
     await refreshCostumePreview(vm.getTarget(selectedTarget.name) ?? selectedTarget)
     status = 'Vector object updated'
@@ -2882,8 +2947,7 @@
     if (!element) return
     if (captureHistory) await captureCostumeHistory(selectedTarget, index)
     await moveVectorEditablePoint(element, pointIndex, x, y, splitHandles)
-    const nextSvg = new XMLSerializer().serializeToString(doc.documentElement)
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(nextSvg))
+    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, index, new XMLSerializer().serializeToString(doc.documentElement))
     vectorObjects = await paperVectorObjectList(nextSvg)
     selectedVectorObjectIndex = objectIndex
     selectedVectorObjectIndices = [objectIndex]
@@ -2905,8 +2969,7 @@
       const element = children[selectedIndex]
       if (element) await mutator(element)
     }
-    const nextSvg = new XMLSerializer().serializeToString(doc.documentElement)
-    await vm.updateCostume(selectedTarget.name, index, { dataFormat: 'svg', rotationCenterX: 240, rotationCenterY: 180 }, new TextEncoder().encode(nextSvg))
+    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, index, new XMLSerializer().serializeToString(doc.documentElement))
     vectorObjects = await paperVectorObjectList(nextSvg)
     selectedVectorObjectIndices = selectedVectorObjectIndices.filter((item) => vectorObjects.some((object) => object.index === item))
     selectedVectorObjectIndex = selectedVectorObjectIndices.at(-1) ?? -1
@@ -4529,7 +4592,7 @@
       if (workspace) Blockly.svgResize(workspace)
     })
     resizeObserver.observe(blocklyHost)
-    if (selectedTarget) loadTargetWorkspace(selectedTarget)
+    if (!selectedExternalTabId && selectedTab === 'code' && selectedTarget) loadTargetWorkspace(selectedTarget)
   }
 
   function selectedToolboxCategoryName() {
@@ -5136,6 +5199,41 @@
     })
   }
 
+  function syncSelectedTargetWorkspace(target: ScratchTarget) {
+    const targetId = target.id ?? target.name
+    if (shouldDeferBlocklyLoad(target)) {
+      if (deferredBlocklyTargetId === targetId) return
+      workspaceLoadSerial += 1
+      loadingBlockly = false
+      deferredBlocklyTargetId = targetId
+      workspaceTargetId = ''
+      clearRuntimeBlockHighlights()
+      Blockly.Events.disable()
+      try {
+        workspace?.clear()
+      } finally {
+        Blockly.Events.enable()
+      }
+      return
+    }
+    if (workspaceTargetId === targetId && deferredBlocklyTargetId !== targetId) return
+    deferredBlocklyTargetId = ''
+    loadTargetWorkspace(target)
+  }
+
+  function shouldDeferBlocklyLoad(target: ScratchTarget) {
+    const targetId = target.id ?? target.name
+    return !forcedBlocklyTargetIds.has(targetId) && Object.keys(target.blocks).length > LARGE_WORKSPACE_BLOCK_LIMIT
+  }
+
+  function loadDeferredCodeWorkspace() {
+    if (!selectedTarget) return
+    const targetId = selectedTarget.id ?? selectedTarget.name
+    forcedBlocklyTargetIds = new Set([...forcedBlocklyTargetIds, targetId])
+    deferredBlocklyTargetId = ''
+    loadTargetWorkspace(selectedTarget)
+  }
+
   function isProcedurePrototypeArgumentShadow(block: ScratchBlock, blocks: Record<string, ScratchBlock>) {
     if (!block.shadow || !block.opcode.startsWith('argument_reporter_')) return false
     const parent = typeof block.parent === 'string' ? blocks[block.parent] : undefined
@@ -5436,6 +5534,23 @@
         <div class="relative min-h-0 flex-1 overflow-hidden bg-white">
         <CodeEditor bind:host={blocklyHost} visible={!selectedExternalTabId && selectedTab === 'code'} />
         {#if !selectedExternalTabId && selectedTab === 'code'}
+          {#if deferredBlocklyTargetId && selectedTarget}
+            <div class="absolute inset-0 z-40 grid place-items-center bg-white/92 px-6 text-center backdrop-blur-sm">
+              <div class="max-w-md rounded-md border border-slate-200 bg-white p-5 shadow-sm">
+                <h2 class="text-base font-bold text-slate-900">Large block workspace</h2>
+                <p class="mt-2 text-sm leading-6 text-slate-600">
+                  {Object.keys(selectedTarget.blocks).length} blocks are hidden to keep the editor responsive.
+                </p>
+                <button
+                  class="mt-4 h-9 rounded-md bg-[#855cd6] px-4 text-sm font-bold text-white hover:bg-[#7447bf]"
+                  type="button"
+                  on:click={loadDeferredCodeWorkspace}
+                >
+                  Load blocks
+                </button>
+              </div>
+            </div>
+          {/if}
           <button
             class="absolute bottom-0 left-0 z-30 flex h-14 w-[72px] items-center justify-center bg-[#855cd6] text-white shadow-[0_-4px_10px_rgba(0,0,0,0.14)] hover:bg-[#7447bf]"
             type="button"

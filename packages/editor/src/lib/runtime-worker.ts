@@ -22,6 +22,7 @@ export class RuntimeWorkerController {
   private latestSyncId = 0
   private latestProjectSyncId = 0
   private appliedProjectSyncId = 0
+  private initPosted?: Promise<void>
   private queuedRuntimeCommands: Array<() => void> = []
 
   constructor(
@@ -42,12 +43,14 @@ export class RuntimeWorkerController {
     this.worker.onmessage = (event: MessageEvent<RuntimeWorkerEvent>) => {
       const message = event.data
       const syncId = 'syncId' in message ? message.syncId : undefined
-      if (syncId !== undefined && syncId < this.latestSyncId) return
       if (message.type === 'snapshot') {
-        if ((message.event === 'WORKER_READY' || message.event === 'WORKER_SYNC') && syncId !== undefined) {
-          this.appliedProjectSyncId = Math.max(this.appliedProjectSyncId, syncId)
+        const isProjectSyncEvent = message.event === 'WORKER_READY' || message.event === 'WORKER_SYNC'
+        if (isProjectSyncEvent) {
+          if (syncId !== undefined && syncId < this.latestProjectSyncId) return
+          if (syncId !== undefined) this.appliedProjectSyncId = Math.max(this.appliedProjectSyncId, syncId)
           this.flushRuntimeCommands()
         }
+        else if (syncId !== undefined && syncId < this.appliedProjectSyncId) return
         this.onSnapshot(message.snapshot, message.event)
       }
       else if (message.type === 'soundPlayed') this.onSoundPlayed(message.targetName, message.sound, message.snapshot)
@@ -59,8 +62,7 @@ export class RuntimeWorkerController {
     const offscreen = canvas.transferControlToOffscreen()
     const syncId = ++this.latestSyncId
     this.latestProjectSyncId = syncId
-    this.worker.postMessage({ type: 'init', canvas: offscreen, snapshot, assets: this.vm.exportAssetBytes(), syncId }, [offscreen])
-    void this.sync(snapshot)
+    this.initPosted = this.postInit(offscreen, snapshot, syncId)
     this.transferredCanvas = canvas
     this.initialized = true
     this.resize(canvas.width, canvas.height)
@@ -71,13 +73,7 @@ export class RuntimeWorkerController {
     if (!this.worker) return
     const syncId = ++this.latestSyncId
     this.latestProjectSyncId = syncId
-    this.worker.postMessage({ type: 'sync', snapshot, assets: this.vm.exportAssetBytes(), syncId })
-    void this.rasterizeCostumes(snapshot).then((images) => {
-      this.worker?.postMessage(
-        { type: 'cacheImages', images, syncId },
-        images.map((item) => item.image),
-      )
-    })
+    await this.postSync(snapshot, syncId)
   }
 
   resize(width: number, height: number): void {
@@ -85,7 +81,7 @@ export class RuntimeWorkerController {
   }
 
   greenFlag(): void {
-    this.postRuntimeCommand({ type: 'greenFlag' })
+    this.postRuntimeCommandWithImages({ type: 'greenFlag' }, this.vm.lightweightSnapshot())
   }
 
   stopAll(): void {
@@ -133,6 +129,7 @@ export class RuntimeWorkerController {
     this.worker?.terminate()
     this.worker = undefined
     this.initialized = false
+    this.initPosted = undefined
   }
 
   private async rasterizeCostumes(snapshot: RuntimeSnapshot): Promise<WorkerCostumeImage[]> {
@@ -143,8 +140,31 @@ export class RuntimeWorkerController {
       const assetId = costume.md5ext ?? costume.assetId
       if (assetId && isImageFormat(dataFormat)) unique.set(`${assetId}:${dataFormat}`, { costume, dataFormat, assetId })
     }
-    const images = await Promise.all([...unique.values()].map((item) => this.rasterizeCostume(item.costume, item.assetId, item.dataFormat)))
+    const images = await Promise.all([...unique.values()].map(async (item) => {
+      try {
+        return await this.rasterizeCostume(item.costume, item.assetId, item.dataFormat)
+      } catch {
+        return undefined
+      }
+    }))
     return images.filter((image): image is WorkerCostumeImage => image !== undefined)
+  }
+
+  private async postInit(offscreen: OffscreenCanvas, snapshot: RuntimeSnapshot, syncId: number): Promise<void> {
+    const images = await this.rasterizeCostumes(snapshot)
+    this.worker?.postMessage(
+      { type: 'init', canvas: offscreen, snapshot, assets: this.vm.exportAssetBytes(), images, syncId },
+      [offscreen, ...transferImages(images)],
+    )
+  }
+
+  private async postSync(snapshot: RuntimeSnapshot, syncId: number): Promise<void> {
+    await this.initPosted
+    const images = await this.rasterizeCostumes(snapshot)
+    this.worker?.postMessage(
+      { type: 'sync', snapshot, assets: this.vm.exportAssetBytes(), images, syncId },
+      transferImages(images),
+    )
   }
 
   private async rasterizeCostume(costume: ScratchCostume, assetId: string, dataFormat: string): Promise<WorkerCostumeImage | undefined> {
@@ -175,11 +195,28 @@ export class RuntimeWorkerController {
     else post()
   }
 
+  private postRuntimeCommandWithImages(command: Record<string, unknown>, snapshot: RuntimeSnapshot): void {
+    const post = () => {
+      void this.rasterizeCostumes(snapshot).then((images) => {
+        this.worker?.postMessage(
+          { ...command, images, syncId: ++this.latestSyncId },
+          transferImages(images),
+        )
+      })
+    }
+    if (this.appliedProjectSyncId < this.latestProjectSyncId) this.queuedRuntimeCommands.push(post)
+    else post()
+  }
+
   private flushRuntimeCommands(): void {
     if (this.appliedProjectSyncId < this.latestProjectSyncId) return
     const commands = this.queuedRuntimeCommands.splice(0)
     for (const command of commands) command()
   }
+}
+
+function transferImages(images: WorkerCostumeImage[]): ImageBitmap[] {
+  return images.map((item) => item.image)
 }
 
 function md5extFormat(md5ext?: string): string {

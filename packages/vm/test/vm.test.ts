@@ -5,11 +5,20 @@ import { join } from 'node:path'
 import { ArgumentType, Asset, AssetType, BitmapAdapter, BlockType, Cast, Clone, Color, DataFormat, Helper, MathUtil, SVGRenderer, ScratchCanvasRenderer, ScratchStorage, ScratchVM, StringUtil, TargetType, costumeUpload, createDefaultProject, createVMAsset, defineMessages, extractFileName, getMonitorIdForBlockWithArgs, getProjectTitleFromFilename, loadSvgString, normalizeProject, parse, parseScratchProject, sanitizeSvg, scratchFetch, serializeSvgToString, soundUpload, spriteUpload, toListIndex, uid, unpackScratchInput, validate, validateProject, type RuntimeSnapshot, type ScratchBlock, type ScratchTarget } from '../src/index'
 
 describe('ScratchVM clean-room core', () => {
-  it('creates an SB3-shaped default project', () => {
+  it('creates an SB3-shaped default project', async () => {
     const project = createDefaultProject()
     expect(project.targets[0]?.isStage).toBe(true)
     expect(project.targets[1]?.name).toBe('Sprite1')
+    expect(project.targets[1]?.costumes[0]).toMatchObject({
+      name: 'Cat-a',
+      assetId: 'bcf454acf82e4504149f7ffe07081dbc',
+      md5ext: 'bcf454acf82e4504149f7ffe07081dbc.svg',
+    })
     expect(project.meta.semver).toBe('3.0.0')
+
+    const vm = new ScratchVM()
+    const bytes = await vm.loadAsset('bcf454acf82e4504149f7ffe07081dbc.svg', 'svg')
+    expect(strFromU8(bytes ?? new Uint8Array())).toContain('costume1.1')
   })
 
   it('normalizes partial SB3 JSON without mutating the input', () => {
@@ -23,6 +32,54 @@ describe('ScratchVM clean-room core', () => {
     expect(project.targets.some((target) => !target.isStage)).toBe(true)
     expect(input.targets).toHaveLength(1)
     expect(project.cloudVariables).toEqual({ projectId: 'p1' })
+  })
+
+  it('normalizes named fallback stage backdrops to Scratch-compatible asset IDs', async () => {
+    const vm = new ScratchVM()
+    vm.loadProject({
+      targets: [
+        {
+          isStage: true,
+          name: 'Stage',
+          variables: {},
+          lists: {},
+          broadcasts: {},
+          blocks: {},
+          comments: {},
+          currentCostume: 0,
+          costumes: [{
+            assetId: 'black-backdrop',
+            name: 'black backdrop',
+            md5ext: 'black-backdrop.svg',
+            dataFormat: 'svg',
+            bitmapResolution: 1,
+            rotationCenterX: 240,
+            rotationCenterY: 180,
+          }],
+          sounds: [],
+        },
+        {
+          isStage: false,
+          name: 'Sprite1',
+          variables: {},
+          lists: {},
+          broadcasts: {},
+          blocks: {},
+          comments: {},
+          costumes: [],
+          sounds: [],
+        },
+      ],
+    })
+
+    const stageCostume = vm.getStage().costumes[0]
+    expect(stageCostume?.assetId).toBe('cd21514d0531fdffb22204e0ec5ed84a')
+    expect(stageCostume?.md5ext).toBe('cd21514d0531fdffb22204e0ec5ed84a.svg')
+
+    const files = unzipSync(await vm.saveProjectSb3())
+    const exportedJson = JSON.parse(strFromU8(files['project.json']!))
+    expect(exportedJson.targets[0].costumes[0].assetId).toBe('cd21514d0531fdffb22204e0ec5ed84a')
+    expect(files['cd21514d0531fdffb22204e0ec5ed84a.svg']).toBeDefined()
   })
 
   it('preserves zero-valued target metadata while normalizing projects', () => {
@@ -489,7 +546,7 @@ describe('ScratchVM clean-room core', () => {
     await vm.updateCostume('Sprite2', 0, { name: 'painted', dataFormat: 'svg' }, strToU8('<svg id="painted"></svg>'))
 
     expect(vm.getTarget('Sprite2')?.costumes[0]).toMatchObject({ name: 'painted', assetId: expect.any(String), md5ext: expect.stringContaining('.svg') })
-    expect(vm.getTarget('Sprite1')?.costumes[0]).toMatchObject({ name: 'costume1', assetId: 'default-sprite', md5ext: 'default-sprite.svg' })
+    expect(vm.getTarget('Sprite1')?.costumes[0]).toMatchObject({ name: 'Cat-a', assetId: 'bcf454acf82e4504149f7ffe07081dbc', md5ext: 'bcf454acf82e4504149f7ffe07081dbc.svg' })
     expect(String(vm.getCostume(0, 'Sprite1'))).not.toContain('painted')
   })
 
@@ -654,7 +711,10 @@ describe('ScratchVM clean-room core', () => {
     const files = unzipSync(archive)
     expect(files['project.json']).toBeDefined()
     expect(files[asset.md5ext]).toBeDefined()
-    expect(strFromU8(files['default-backdrop.svg']!)).toBe('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360"></svg>')
+    const exportedJson = JSON.parse(strFromU8(files['project.json']!))
+    expect(exportedJson.meta.vm).toMatch(/^([0-9]+\.[0-9]+\.[0-9]+)($|-)/)
+    expect(Object.values(exportedJson.targets[0].variables).every((variable) => !Array.isArray(variable) || variable[2] !== false)).toBe(true)
+    expect(strFromU8(files['cd21514d0531fdffb22204e0ec5ed84a.svg']!)).toBe('<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360"></svg>')
 
     const imported = new ScratchVM()
     imported.loadProject(archive)
@@ -884,7 +944,7 @@ describe('ScratchVM clean-room core', () => {
     await vm.addCostume('Sprite1', { name: 'paint' })
     await vm.duplicateCostume('Sprite1', 1)
     await vm.duplicateCostume('Sprite1', 1)
-    expect(vm.getTarget('Sprite1')?.costumes.map((costume) => costume.name)).toEqual(['costume1', 'paint', 'paint copy2', 'paint copy'])
+    expect(vm.getTarget('Sprite1')?.costumes.map((costume) => costume.name)).toEqual(['Cat-a', 'paint', 'paint copy2', 'paint copy'])
 
     await vm.addSound('Sprite1', { name: 'pop', dataFormat: 'wav' })
     await vm.duplicateSound('Sprite1', 0)
@@ -1139,7 +1199,7 @@ describe('ScratchVM clean-room core', () => {
     const extensionId = vm.extensionManager._registerInternalExtension?.({ getInfo: () => ({ id: 'clean', blocks: [] }) })
     expect(extensionId).toBe('clean')
     expect(vm.extensionManager.isExtensionLoaded('clean')).toBe(true)
-    expect(vm.assets.some((asset) => asset.name === 'costume1')).toBe(true)
+    expect(vm.assets.some((asset) => asset.name === 'Cat-a')).toBe(true)
   })
 
   it('converts Scratch 2 project and sprite objects into the Level 1 model', () => {

@@ -156,6 +156,8 @@ export const DataFormat = {
 
 export type DataFormat = (typeof DataFormat)[keyof typeof DataFormat]
 
+const SCRATCH_VM_VERSION = '0.2.0'
+
 export const ArgumentType = {
   ANGLE: 'angle',
   BOOLEAN: 'Boolean',
@@ -541,10 +543,10 @@ export class ScratchStorage {
   }
 
   private registerDefaultAssets(): void {
-    this.cache(AssetType.ImageVector, DataFormat.SVG, strToU8(defaultSpriteSvg), 'default-sprite')
+    this.cache(AssetType.ImageVector, DataFormat.SVG, strToU8(defaultSpriteSvg), defaultSpriteAssetId)
     this.cache(AssetType.ImageBitmap, DataFormat.PNG, new Uint8Array(), 'default-bitmap')
     this.cache(AssetType.Sound, DataFormat.WAV, new Uint8Array(placeholderWav), 'default-sound')
-    this.setDefaultAssetId(AssetType.ImageVector, 'default-sprite')
+    this.setDefaultAssetId(AssetType.ImageVector, defaultSpriteAssetId)
     this.setDefaultAssetId(AssetType.ImageBitmap, 'default-bitmap')
     this.setDefaultAssetId(AssetType.Sound, 'default-sound')
   }
@@ -683,25 +685,70 @@ type RuntimeStackFrame =
   | { kind: 'loop'; blockId: string; remaining: number; callDepth: number; until?: boolean; forEach?: { variable: string; index: number; total: number } }
   | { kind: 'continuation'; returnTo: string | null; callDepth: number }
 
-const defaultSpriteSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="96" height="96"><circle cx="48" cy="48" r="40" fill="#ffab19"/></svg>'
+const defaultSpriteSvg = `<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="95.17898101806641" height="100.04156036376953" viewBox="0.3210171699523926 0.3000000357627869 95.17898101806641 100.04156036376953" version="1.1" xml:space="preserve">
+  <g>
+    <title>costume1.1</title>
+    <g id="Page-1" stroke="none" fill-rule="evenodd">
+      <g id="costume1">
+        <g id="costume1.1">
+          <g id="tail">
+            <path d="M 21.9 73.8 C 19.5 73.3 16.6 72.5 14.2 70.3 C 8.7 65.4 7 57.3 3.2 59.4 C -0.7 61.5 -0.6 74.6 11.6 78.6 C 15.8 80 19.6 80 22.7 79.9 C 23.5 79.9 30.4 79.2 32.8 75.8 C 35.2 72.4 33.5 71.5 32.7 71.1 C 31.8 70.6 25.3 74.4 21.9 73.8 Z " stroke="#001026" stroke-width="1.2" fill="#FFAB19" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M 3.8 59.6 C 1.8 60.2 0.8 64.4 1.8 67.9 C 2.8 71.4 4.4 73.2 5.7 74.5 C 5.5 73.8 5.1 71.6 6.8 70.3 C 8.9 68.6 12.6 69.5 12.6 69.5 C 12.6 69.5 9.5 65.7 7.9 63 C 6.3 60.7 5.8 59.2 3.8 59.6 Z " id="detail" fill="#FFFFFF" stroke-width="1"/>
+          </g>
+          <path d="M37.7,81.5 C35.9,82.7 29.7,87.1 21.8,89.6 L21.4,89.7 C21,89.8 20.8,90.3 21,90.7 C22.7,93.1 25.8,97.9 20.3,99.6 C15,101.3 5.1,87.2 9.3,83.5 C11.2,82.1 12.9,82.8 13.8,83.2 C14.3,83.4 14.8,83.4 15.3,83.3 C16.5,82.9 18.7,82.1 20.4,81.2 C24.7,79 25.7,78.1 27.7,76.6 C29.7,75.1 34.3,71.4 38,74.6 C41.2,77.3 39.4,80.3 37.7,81.5 Z" id="leg" stroke="#001026" stroke-width="1.2" fill="#FFAB19" stroke-linecap="round" stroke-linejoin="round"/>
+          <path d="M53.6,60.7 C54.1,61.1 60.2,68.3 62.2,66.5 C64.6,64.4 67.9,60.3 71.5,63.6 C75.1,66.9 68.3,72.5 65.4,74 C58.5,77.1 52.9,71.2 51.7,69.6 C50.5,68 48.4,65.3 48.4,62.7 C48.5,59.9 51.9,59.2 53.6,60.7 Z" id="arm" stroke="#001026" stroke-width="1.2" fill="#FFAB19" stroke-linecap="round" stroke-linejoin="round"/>
+          <g id="body-and-leg">
+            <path d="M 46.2 76.7 C 47.4 75.8 48.6 74.3 50.2 72 C 51.5 70.1 52.9 66.4 52.9 66.4 C 53.8 63.9 54.4 59.1 51.1 59.2 C 48.9 59.3 46.9 59 43.5 58.5 C 37.5 57.3 36.4 56.5 33.9 60.6 C 31.2 65.4 24.3 68.9 32.8 77.2 C 32.8 77.2 37.7 81 43.6 86.8 C 47.6 90.7 53.9 96.3 56.1 98.2 C 56.6 98.6 57.2 98.8 57.8 98.9 C 67.5 99.8 74.7 98.8 74.7 94.5 C 74.7 87.3 60.4 89.8 60.4 89.8 C 60.4 89.8 55.8 85.9 53.7 84 L 46.2 76.7 Z " id="body" stroke="#001026" stroke-width="1.2" fill="#FFAB19" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M 50.6 70 C 50.6 70 52.5 67.5 48.2 64.8 C 43.7 61.9 42 65.1 40.2 67.5 C 38.2 70.6 40.2 72.1 42.2 73.9 C 43.8 75.4 45.3 76.6 45.3 76.6 C 45.3 76.6 48.4 74.5 50.6 70 Z " id="tummy" fill="#FFFFFF" stroke-width="1"/>
+          </g>
+          <path d="M30.2,68.4 C32.4,71.2 35.8,74.7 31.5,77.6 C25.6,80.9 20.7,70.9 19.7,67.4 C18.8,64.3 21.4,62.3 23.6,60.6 C27.9,57.5 31.5,54.7 35.5,56.2 C40.5,58 36.9,62 34.4,63.8 C32.9,64.9 31.4,66.1 30.3,66.8 C30,67.3 29.9,67.9 30.2,68.4 Z" id="arm" stroke="#001026" stroke-width="1.2" fill="#FFAB19" stroke-linecap="round" stroke-linejoin="round"/>
+          <g id="head">
+            <path d="M 53.1 9 C 50.8 8.6 48.4 8.4 45.6 8.6 C 40.9 8.8 36.4 10.5 36.4 10.5 L 24.3 2.6 C 23.9 2.4 23.4 2.7 23.5 3.1 L 25.6 21 C 26.2 20.2 15 33.8 22.1 45.2 C 29.2 56.6 44.3 61.7 63.1 58 C 81.9 54.3 86.3 43.5 85.1 37.8 C 83.9 32.1 76.8 30 76.8 30 C 76.8 30 76.7 25.5 73.5 20 C 71.6 16.7 65.2 12 65.2 12 L 62.6 1.3 C 62.5 0.9 62 0.8 61.7 1 L 53.1 9 Z " stroke="#001026" stroke-width="1.2" fill="#FFAB19"/>
+            <path d="M 76.5 30.4 C 76.5 30.4 83.4 32.2 84.6 37.9 C 85.8 43.6 81 53.9 62.4 57.5 C 38.2 62.5 26.7 48.1 33.4 37.5 C 40.1 26.8 51.6 35.9 60 35.3 C 67.2 34.8 68 28.5 76.5 30.4 Z " id="face" fill="#FFFFFF" stroke-width="1"/>
+            <path d="M 45 41.1 C 45 40.7 45.4 40.4 45.8 40.5 C 47.7 41.2 53.1 42.8 59.1 43.2 C 64.5 43.5 67.7 43.2 69.2 42.9 C 69.7 42.8 70.1 43.3 69.9 43.8 C 69 46.5 65.2 54 54.7 53.4 C 45.6 52.4 44.7 46 45 41.1 Z " id="mouth" stroke="#001026" stroke-width="1.2" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M 83 35.4 C 83 35.4 90.2 35.3 94.9 31.5 " id="whisker" stroke="#001026" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M 83.4 41.3 C 83.4 41.3 87.3 43.2 93.6 42.7 " id="whisker" stroke="#001026" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M 59.6 32.7 C 61.7 32.7 63.9 32.9 64 33.6 C 64.1 35 62.6 37.8 61 37.9 C 59.2 38.1 55 35.6 55 34 C 54.9 32.8 57.6 32.7 59.6 32.7 Z " id="nose" stroke="#001026" stroke-width="1.2" fill="#001026" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M 14.6 31.2 C 14.6 31.2 23.2 34 26.7 37.1 " id="whisker" stroke="#001026" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <path d="M 15.3 41.2 C 15.3 41.2 22.7 42.3 27 40.6 " id="whisker" stroke="#001026" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round" fill="none"/>
+            <g id="eye">
+              <path d="M 71.4 21 C 74.3 25.5 74.4 30.6 71.6 32.4 C 68.8 34.2 64.2 32.1 61.2 27.6 C 58.3 23.1 58.2 18 61 16.2 C 63.8 14.3 68.5 16.5 71.4 21 Z " id="pupil" stroke="#001026" stroke-width="1.2" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M 71 26.7 C 71 27.8 70.2 28.7 69.2 28.7 C 68.2 28.7 67.4 27.8 67.4 26.7 C 67.4 25.6 68.2 24.7 69.2 24.7 C 70.2 24.7 71 25.6 71 26.7 " id="pupil" fill="#001026" stroke-width="1"/>
+            </g>
+            <g id="eye">
+              <path d="M 46.6 23.8 C 49.6 28.2 49.4 33.6 46.7 35.5 C 43.4 37.4 39 36 36 31.6 C 32.9 27.2 32.7 21.5 35.8 19.3 C 38.9 17 43.6 19.4 46.6 23.8 Z " stroke="#001026" stroke-width="1.2" fill="#FFFFFF" stroke-linecap="round" stroke-linejoin="round"/>
+              <path d="M 46 29.6 C 46 30.7 45.2 31.6 44.2 31.6 C 43.2 31.6 42.4 30.7 42.4 29.6 C 42.4 28.5 43.2 27.6 44.2 27.6 C 45.2 27.7 46 28.5 46 29.6 " id="pupil" fill="#001026" stroke-width="1"/>
+            </g>
+          </g>
+        </g>
+      </g>
+    </g>
+  </g>
+</svg>`
+const defaultSpriteAssetId = 'bcf454acf82e4504149f7ffe07081dbc'
+const defaultSpriteMd5ext = `${defaultSpriteAssetId}.svg`
+const defaultBackdropAssetId = 'cd21514d0531fdffb22204e0ec5ed84a'
+const defaultBackdropMd5ext = `${defaultBackdropAssetId}.svg`
 const emptyStageBackdropSvg = '<svg xmlns="http://www.w3.org/2000/svg" width="480" height="360" viewBox="0 0 480 360"></svg>'
 const THREAD_STEP_BUDGET = 256
 const WARP_THREAD_STEP_BUDGET = 100000
+const DRAWABLE_FRAME_TIME_BUDGET_MS = 1000 / 30
 
 const stageCostume: ScratchCostume = {
   name: 'backdrop1',
   dataFormat: 'svg',
-  assetId: 'default-backdrop',
-  md5ext: 'default-backdrop.svg',
+  assetId: defaultBackdropAssetId,
+  md5ext: defaultBackdropMd5ext,
   rotationCenterX: 240,
   rotationCenterY: 180,
 }
 
 const spriteCostume: ScratchCostume = {
-  name: 'costume1',
+  name: 'Cat-a',
   dataFormat: 'svg',
-  assetId: 'default-sprite',
-  md5ext: 'default-sprite.svg',
+  assetId: defaultSpriteAssetId,
+  md5ext: defaultSpriteMd5ext,
+  bitmapResolution: 1,
   rotationCenterX: 48,
   rotationCenterY: 50,
 }
@@ -1126,8 +1173,12 @@ export class ScratchVM {
     const backdropSvg = strToU8(emptyStageBackdropSvg)
     const spriteSvg = strToU8(defaultSpriteSvg)
     const wav = placeholderAssetBytes('wav')
+    this.assetBytes.set(defaultBackdropAssetId, new Uint8Array(backdropSvg))
+    this.assetBytes.set(defaultBackdropMd5ext, new Uint8Array(backdropSvg))
     this.assetBytes.set('default-backdrop', new Uint8Array(backdropSvg))
     this.assetBytes.set('default-backdrop.svg', new Uint8Array(backdropSvg))
+    this.assetBytes.set(defaultSpriteAssetId, new Uint8Array(spriteSvg))
+    this.assetBytes.set(defaultSpriteMd5ext, new Uint8Array(spriteSvg))
     this.assetBytes.set('default-sprite', new Uint8Array(spriteSvg))
     this.assetBytes.set('default-sprite.svg', new Uint8Array(spriteSvg))
     if (wav) {
@@ -1202,10 +1253,12 @@ export class ScratchVM {
       const selected = this.project.targets.find((target) => !target.isStage) ?? this.project.targets[0]
       this.selectedTargetId = selected?.id ?? selected?.name ?? 'Stage'
       this.resetExecutionState({ clearKeyboard: true, clearAnswer: true })
-      this.emit('PROJECT_LOADED', this.snapshot())
-      this.emit('TARGETS_UPDATE', this.snapshot())
-      this.emit('WORKSPACE_UPDATE', this.snapshot())
+      const snapshot = this.runtimeSnapshot()
+      this.emit('PROJECT_LOADED', snapshot)
+      this.emit('TARGETS_UPDATE', snapshot)
+      this.emit('WORKSPACE_UPDATE', snapshot)
       if (hadCloudData !== this.hasCloudData()) this.emit('HAS_CLOUD_DATA_UPDATE', this.hasCloudData())
+      this.seedDefaultAssetBytes()
       this.ensureReferencedAssetBytes()
       return Promise.resolve(this.project)
     } catch (error) {
@@ -1360,6 +1413,10 @@ export class ScratchVM {
     }
   }
 
+  lightweightSnapshot(): RuntimeSnapshot {
+    return this.runtimeSnapshot()
+  }
+
   private runtimeSnapshot(): RuntimeSnapshot {
     this.refreshMonitorValues()
     return {
@@ -1377,8 +1434,8 @@ export class ScratchVM {
     return this.running
   }
 
-  applyRuntimeSnapshot(snapshot: RuntimeSnapshot): void {
-    this.project = structuredClone(snapshot.project)
+  applyRuntimeSnapshot(snapshot: RuntimeSnapshot, options: { cloneProject?: boolean } = {}): void {
+    this.project = options.cloneProject === false ? snapshot.project : structuredClone(snapshot.project)
     this.selectedTargetId = snapshot.selectedTargetId
     this.origin = snapshot.origin
     this.running = snapshot.running
@@ -2230,7 +2287,7 @@ export class ScratchVM {
     if (!target) return id
     const shouldBeCloud = isCloud === true && target.isStage && this.canAddCloudVariable()
     const hadCloudData = this.hasCloudData()
-    target.variables[id] = [name, value, shouldBeCloud]
+    target.variables[id] = createVariableRecord(name, value, shouldBeCloud)
     this.clearDataLookupCache(target)
     if (shouldBeCloud) callProvider(this.cloudProvider, 'createVariable', name, value)
     this.emit('PROJECT_CHANGED', this.snapshot())
@@ -2824,7 +2881,7 @@ export class ScratchVM {
     const target = this.getSelectedTarget()
     const id = String(event.varId ?? event.variableId ?? makeId('variable'))
     if (event.type === 'var_create' || event.type === 'create') {
-      target.variables[id] = [String(event.varName ?? event.name ?? 'variable'), toScratchValue(event.value ?? 0), event.isCloud === true]
+      target.variables[id] = createVariableRecord(String(event.varName ?? event.name ?? 'variable'), toScratchValue(event.value ?? 0), event.isCloud === true)
     } else if (event.type === 'var_rename' || event.type === 'rename') {
       const variable = this.variableRecord(target, id)
       const nextName = String(event.newName ?? event.varName ?? event.name ?? variable?.[1][0] ?? '')
@@ -3247,16 +3304,18 @@ export class ScratchVM {
     callAudio(this.audioEngine, 'stopAllSounds')
     this.running = false
     this.clearGlows()
+    const snapshot = this.runtimeSnapshot()
     this.emit('QUESTION', { question: null })
-    this.emit('SOUNDS_STOPPED', this.snapshot())
-    this.emit('PROJECT_RUN_STOP', this.snapshot())
-    this.emit('PROJECT_STOP_ALL', this.snapshot())
-    this.emit('TARGETS_UPDATE', this.snapshot())
+    this.emit('SOUNDS_STOPPED', snapshot)
+    this.emit('PROJECT_RUN_STOP', snapshot)
+    this.emit('PROJECT_STOP_ALL', snapshot)
+    this.emit('TARGETS_UPDATE', snapshot)
   }
 
   step(now = Date.now()): RuntimeSnapshot {
     const delta = Math.max(0, now - this.lastStep)
     this.lastStep = now
+    const frameDeadline = runtimeNow() + DRAWABLE_FRAME_TIME_BUDGET_MS
     const stopAllGenerationBeforeStep = this.stopAllGeneration
     this.startGreaterThanHats(now)
     this.startTouchingObjectHats()
@@ -3266,7 +3325,7 @@ export class ScratchVM {
     this.runtimeStepActive = true
     try {
       for (const thread of this.threads) {
-        if (!thread.done) completedDrawableFrame = this.stepThread(thread, now, delta) && completedDrawableFrame
+        if (!thread.done) completedDrawableFrame = this.stepThread(thread, now, delta, frameDeadline) && completedDrawableFrame
       }
     } finally {
       this.runtimeStepActive = false
@@ -3278,7 +3337,7 @@ export class ScratchVM {
     this.threads = this.threads.filter((thread) => !thread.done)
     this.running = this.threads.length > 0
     const snapshot = this.runtimeSnapshot()
-    this.renderer?.requestDraw?.(snapshot)
+    if (completedDrawableFrame || !this.running) this.renderer?.requestDraw?.(snapshot)
     this.emit('RUNTIME_STEP', snapshot)
     if (this.runtimeTargetsChanged) {
       this.runtimeTargetsChanged = false
@@ -3338,7 +3397,7 @@ export class ScratchVM {
     else this.emit('TARGETS_UPDATE', this.snapshot())
   }
 
-  private stepThread(thread: RuntimeThread, now: number, _delta: number): boolean {
+  private stepThread(thread: RuntimeThread, now: number, _delta: number, frameDeadline: number): boolean {
     if (thread.waitUntil > now) return true
     if (thread.waitingFor?.some((child) => !child.done)) return true
     thread.waitingFor = undefined
@@ -3349,6 +3408,7 @@ export class ScratchVM {
         budget = WARP_THREAD_STEP_BUDGET
         warpBudgetApplied = true
       }
+      if (this.threadInWarpProcedure(thread) && runtimeNow() >= frameDeadline) return false
       const block = thread.target.blocks[thread.currentBlockId]
       if (!block) {
         thread.done = true
@@ -5047,7 +5107,7 @@ export function createDefaultProject(): ScratchProject {
     extensions: [],
     meta: {
       semver: '3.0.0',
-      vm: 'hikkaku-clean-room',
+      vm: SCRATCH_VM_VERSION,
       agent: 'hikkaku-cloud',
     },
   }
@@ -5817,7 +5877,7 @@ export function normalizeProject(input: unknown): ScratchProject {
   if (!targets.some((target) => !target.isStage)) targets.push(createSpriteTarget('Sprite1', targets.length))
   const meta: ScratchProject['meta'] = {
     semver: isObject(input.meta) && typeof input.meta.semver === 'string' ? input.meta.semver : '3.0.0',
-    vm: 'hikkaku-clean-room',
+    vm: SCRATCH_VM_VERSION,
     agent: typeof navigator === 'undefined' ? 'node' : navigator.userAgent,
   }
   if (isObject(input.meta) && typeof input.meta.origin === 'string') meta.origin = input.meta.origin
@@ -6131,7 +6191,7 @@ function projectFromSpriteJson(sprite: unknown): ScratchProject {
     extensions: [],
     meta: {
       semver: '3.0.0',
-      vm: 'hikkaku-clean-room',
+      vm: SCRATCH_VM_VERSION,
       agent: typeof navigator === 'undefined' ? 'node' : navigator.userAgent,
     },
   }
@@ -6155,7 +6215,7 @@ function convertSb2Project(input: Record<string, unknown>): ScratchProject {
     extensions: [],
     meta: {
       semver: '3.0.0',
-      vm: 'hikkaku-clean-room',
+      vm: SCRATCH_VM_VERSION,
       agent: typeof navigator === 'undefined' ? 'node' : navigator.userAgent,
     },
   }
@@ -6197,7 +6257,7 @@ function convertSb2Variables(input: unknown): Record<string, VariableRecord> {
     if (!isObject(variable)) continue
     const name = String(variable.name ?? variable.varName ?? '')
     if (!name) continue
-    output[name] = [name, toScratchValue(variable.value), variable.isPersistent === true]
+    output[name] = createVariableRecord(name, toScratchValue(variable.value), variable.isPersistent === true)
   }
   return output
 }
@@ -6499,9 +6559,13 @@ function normalizeVariables(input: unknown): Record<string, VariableRecord> {
   if (!isObject(input)) return {}
   const output: Record<string, VariableRecord> = {}
   for (const [id, value] of Object.entries(input)) {
-    if (Array.isArray(value)) output[id] = [String(value[0] ?? id), toScratchValue(value[1]), value[2] === true]
+    if (Array.isArray(value)) output[id] = createVariableRecord(String(value[0] ?? id), toScratchValue(value[1]), value[2] === true)
   }
   return output
+}
+
+function createVariableRecord(name: string, value: ScratchValue, isCloud = false): VariableRecord {
+  return isCloud === true ? [name, value, true] : [name, value]
 }
 
 function normalizeLists(input: unknown): Record<string, ListRecord> {
@@ -6888,6 +6952,12 @@ function normalizeCostumes(input: unknown, isStage: boolean): ScratchCostume[] {
 }
 
 function normalizeCostume(input: Partial<ScratchCostume> | Record<string, unknown>, index: number, isStage: boolean): ScratchCostume {
+  if (isStage && isFallbackStageBackdrop(input)) {
+    return {
+      ...stageCostume,
+      name: typeof input.name === 'string' && input.name ? input.name : `backdrop${index + 1}`,
+    }
+  }
   return {
     assetId: typeof input.assetId === 'string' ? input.assetId : undefined,
     name: typeof input.name === 'string' && input.name ? input.name : isStage ? `backdrop${index + 1}` : `costume${index + 1}`,
@@ -6897,6 +6967,16 @@ function normalizeCostume(input: Partial<ScratchCostume> | Record<string, unknow
     rotationCenterX: finiteNumberOr(input.rotationCenterX, 0),
     rotationCenterY: finiteNumberOr(input.rotationCenterY, 0),
   }
+}
+
+function isFallbackStageBackdrop(input: Partial<ScratchCostume> | Record<string, unknown>): boolean {
+  if (input.assetId === defaultBackdropAssetId || input.md5ext === defaultBackdropMd5ext) return true
+  if (input.assetId === 'blank-backdrop' || input.assetId === 'default-backdrop' || input.assetId === 'black-backdrop') return true
+  if (input.md5ext === 'blank-backdrop.svg' || input.md5ext === 'default-backdrop.svg' || input.md5ext === 'black-backdrop.svg') return true
+  return input.dataFormat === 'svg'
+    && typeof input.md5ext !== 'string'
+    && !Number.isFinite(input.rotationCenterX)
+    && !Number.isFinite(input.rotationCenterY)
 }
 
 function normalizeSounds(input: unknown): ScratchSound[] {
@@ -8429,6 +8509,10 @@ function changePenParam(target: ScratchTarget, param: string, value: number, cha
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null
+}
+
+function runtimeNow(): number {
+  return typeof performance !== 'undefined' ? performance.now() : Date.now()
 }
 
 function isRotationStyle(value: unknown): value is RotationStyle {

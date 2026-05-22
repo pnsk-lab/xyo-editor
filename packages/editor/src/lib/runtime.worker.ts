@@ -10,7 +10,7 @@ type RuntimeWorkerCommand =
   | { type: 'sync'; snapshot: RuntimeSnapshot; assets: Record<string, Uint8Array>; images?: WorkerCostumeImage[]; syncId: number }
   | { type: 'cacheImages'; images?: WorkerCostumeImage[]; syncId?: number }
   | { type: 'resize'; width: number; height: number }
-  | { type: 'greenFlag'; syncId?: number }
+  | { type: 'greenFlag'; images?: WorkerCostumeImage[]; syncId?: number }
   | { type: 'stopAll'; syncId?: number }
   | { type: 'step'; syncId?: number }
   | { type: 'toggleScript'; topBlockId: string; targetId: string; syncId?: number }
@@ -44,8 +44,6 @@ let applyingHostSnapshot = false
 let latestHostSyncId = 0
 let frameCount = 0
 let fpsWindowStart = performance.now()
-let lastFrameTime = 0
-let frameAccumulator = 0
 let lastRuntimeSnapshotPost = 0
 const runtimeFrameInterval = 1000 / 30
 
@@ -66,29 +64,24 @@ const countFrame = () => {
 }
 
 const postRuntimeSnapshot = (event: string, syncId = latestHostSyncId) => {
-  const message: RuntimeWorkerEvent = { type: 'snapshot', event, snapshot: vm.snapshot(), syncId }
+  const message: RuntimeWorkerEvent = { type: 'snapshot', event, snapshot: vm.lightweightSnapshot(), syncId }
   self.postMessage(message)
 }
 
 const beginFrameTimer = () => {
   if (frameTimer) return
-  lastFrameTime = performance.now()
-  frameAccumulator = 0
   const step = (now = performance.now()) => {
     if (!frameTimer) return
-    frameAccumulator += Math.max(0, now - lastFrameTime)
-    lastFrameTime = now
     if (vm.isRunning()) {
-      while (frameAccumulator >= runtimeFrameInterval) {
-        vm.step(now)
-        frameAccumulator -= runtimeFrameInterval
-      }
-      frameTimer = scheduleRuntimeFrame(step)
+      const startedAt = performance.now()
+      vm.step(now)
+      const elapsed = performance.now() - startedAt
+      frameTimer = scheduleRuntimeFrame(step, Math.max(0, runtimeFrameInterval - elapsed))
     } else {
       stopFrameTimer()
     }
   }
-  frameTimer = scheduleRuntimeFrame(step)
+  frameTimer = scheduleRuntimeFrame(step, runtimeFrameInterval)
 }
 
 const stopFrameTimer = () => {
@@ -98,8 +91,8 @@ const stopFrameTimer = () => {
   resetFps()
 }
 
-const scheduleRuntimeFrame = (callback: (now?: number) => void): ReturnType<typeof setTimeout> | number => {
-  return setTimeout(() => callback(performance.now()), 0)
+const scheduleRuntimeFrame = (callback: (now?: number) => void, delay = 0): ReturnType<typeof setTimeout> | number => {
+  return setTimeout(() => callback(performance.now()), delay)
 }
 
 const cancelRuntimeFrame = (handle: ReturnType<typeof setTimeout> | number): void => {
@@ -126,7 +119,7 @@ for (const event of ['PROJECT_LOADED', 'PROJECT_CHANGED', 'TARGETS_UPDATE', 'WOR
 }
 
 vm.on<{ targetName: string; sound: ScratchSound }>('SOUND_PLAYED', ({ targetName, sound }) => {
-  const message: RuntimeWorkerEvent = { type: 'soundPlayed', targetName, sound, snapshot: vm.snapshot(), syncId: latestHostSyncId }
+  const message: RuntimeWorkerEvent = { type: 'soundPlayed', targetName, sound, snapshot: vm.lightweightSnapshot(), syncId: latestHostSyncId }
   self.postMessage(message)
 })
 
@@ -136,7 +129,7 @@ vm.on<RuntimeSnapshot>('SOUNDS_STOPPED', (snapshot) => {
 })
 
 vm.on<{ id: string; value: string }>('VISUAL_REPORT', ({ id, value }) => {
-  const message: RuntimeWorkerEvent = { type: 'visualReport', id, value, snapshot: vm.snapshot(), syncId: latestHostSyncId }
+  const message: RuntimeWorkerEvent = { type: 'visualReport', id, value, snapshot: vm.lightweightSnapshot(), syncId: latestHostSyncId }
   self.postMessage(message)
 })
 
@@ -156,8 +149,8 @@ self.onmessage = async (event: MessageEvent<RuntimeWorkerCommand>) => {
         await vm.loadProject(command.snapshot.project)
         vm.importAssetBytes(command.assets)
         cacheCostumeImages(command.images)
-        vm.applyRuntimeSnapshot(command.snapshot)
-        renderer.requestDraw?.(vm.snapshot())
+        vm.applyRuntimeSnapshot(command.snapshot, { cloneProject: false })
+        renderer.requestDraw?.(vm.lightweightSnapshot())
         applyingHostSnapshot = false
         postRuntimeSnapshot('WORKER_READY', command.syncId)
         break
@@ -166,21 +159,22 @@ self.onmessage = async (event: MessageEvent<RuntimeWorkerCommand>) => {
         stopFrameTimer()
         vm.importAssetBytes(command.assets)
         cacheCostumeImages(command.images)
-        vm.applyRuntimeSnapshot(command.snapshot)
-        renderer.requestDraw?.(vm.snapshot())
+        vm.applyRuntimeSnapshot(command.snapshot, { cloneProject: false })
+        renderer.requestDraw?.(vm.lightweightSnapshot())
         applyingHostSnapshot = false
         postRuntimeSnapshot('WORKER_SYNC', command.syncId)
         if (vm.isRunning()) beginFrameTimer()
         break
       case 'cacheImages':
         cacheCostumeImages(command.images)
-        renderer.requestDraw?.(vm.snapshot())
+        renderer.requestDraw?.(vm.lightweightSnapshot())
         break
       case 'resize':
         renderer.resize(command.width, command.height)
-        renderer.requestDraw?.(vm.snapshot())
+        renderer.requestDraw?.(vm.lightweightSnapshot())
         break
       case 'greenFlag':
+        cacheCostumeImages(command.images)
         vm.greenFlag()
         beginFrameTimer()
         break
