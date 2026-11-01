@@ -1,15 +1,13 @@
-# impl
+# xyo-editor
 
-To install dependencies:
+## Development
 
-```bash
-bun install
+Install dependencies with pnpm (Bun is also required for the test suite):
+
+```sh
+pnpm install
+pnpm dev
+pnpm check
+pnpm build
+pnpm test
 ```
-
-To run:
-
-```bash
-bun run index.ts
-```
-
-This project was created using `bun init` in bun v1.3.3. [Bun](https://bun.com) is a fast all-in-one JavaScript runtime.

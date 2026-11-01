@@ -18,11 +18,14 @@
   import HiddenFileInputs from './components/HiddenFileInputs.svelte'
   import LibraryDialog from './components/LibraryDialog.svelte'
   import AssetSidebar from './features/AssetLibrary/AssetSidebar.svelte'
+  import { loadCostumeThumbnail, thumbnailUrls, type CostumeThumbnailEntry } from './features/AssetLibrary/costume-thumbnails'
   import BitmapEditor from './features/CostumeEditor/BitmapEditor.svelte'
   import CodeEditor from './features/CodeEditor/CodeEditor.svelte'
   import SoundEditor from './features/SoundEditor/SoundEditor.svelte'
   import StagePanel from './features/Stage/StagePanel.svelte'
   import SpritePane from './features/Targets/SpritePane.svelte'
+  import { createTargetThumbnails } from './features/Targets/target-thumbnails'
+  import { createThumbnailThrottle } from './lib/thumbnail-throttle'
   import {
     addTranslate,
     editableSvgChildren,
@@ -46,7 +49,7 @@
   } from './features/costumes/paper-vector'
   import { vectorBrushMarkup, vectorShapeInRectMarkup, vectorShapeMarkup } from './features/costumes/vector-shapes'
   import { scratchKeyName } from './features/input/scratch-key'
-  import { concatBytes, decodeImaAdpcmWav, replaceSoundSelection as replaceWavSelection, soundSelectionByteRange as wavSelectionByteRange, transformWav as transformWavBytes, wavPeaks, wavWithSamples } from './features/sounds/wav'
+  import { concatBytes, decodeImaAdpcmWav, extractSoundSelection, replaceSoundSelection as replaceWavSelection, selectionAfterTransform, soundSelectionByteRange as wavSelectionByteRange, transformWav as transformWavBytes, wavPeaks, wavWithSamples } from './features/sounds/wav'
   import { applyScratchFields, attachScratchBlockState, makeToolbox, monitorCallbackKey, monitorableReporterSpecs, registerScratchBlocklyBlocks, workspaceToScratchBlocks } from './lib/blockly-adapter'
   import { literalShadowTypeForInput, scratchMenuShadowFieldName } from './lib/block-input-specs'
   import { costumeLibrary, extensionLibrary, soundLibrary, spriteLibrary } from './lib/editor-libraries'
@@ -192,17 +195,35 @@
   let previewPlayheadTimer: ReturnType<typeof setInterval> | undefined
   let previewAudioStartedAt = 0
   let previewAudioDuration = 0
+  let previewRequest = 0
   let previewSelectionStart = 0
   let previewSelectionEnd = 1
   let costumePreviewUrl = ''
   let costumePreviewSvg = ''
   let costumeThumbnailUrls: Record<string, string> = {}
+  let costumeThumbnailEntries: Record<string, CostumeThumbnailEntry> = {}
+  let costumeThumbnailRequest = 0
   let costumeThumbnailSignature = ''
   let targetThumbnailUrls: Record<string, string> = {}
+  const targetThumbnails = createTargetThumbnails(
+    (key, format) => vm.loadAsset(key, format),
+    (urls) => { targetThumbnailUrls = urls },
+    tick,
+  )
+  const costumeThumbnailThrottle = createThumbnailThrottle(
+    (target: ScratchTarget) => { void refreshCostumeThumbnails(target) },
+    () => { costumeThumbnailRequest += 1 },
+  )
+  const targetThumbnailThrottle = createThumbnailThrottle(
+    (items: ScratchTarget[]) => { void refreshTargetThumbnails(items) },
+    targetThumbnails.invalidate,
+  )
+  let costumeThumbnailTarget = ''
   let targetThumbnailSignature = ''
   let targetListSignature = ''
   let assetPreviewRevision = 0
   let soundWaveform: number[] = []
+  let previousSoundSelectionSignature = ''
   let soundTrimStart = 0
   let soundTrimEnd = 1
   let soundPlayhead = 0
@@ -310,6 +331,8 @@
   let soundFileInput: HTMLInputElement
   let blocklyHost: HTMLDivElement
   let stageCanvas: HTMLCanvasElement
+  let attachedStageCanvas: HTMLCanvasElement | undefined
+  let stageMounted = false
   let workspace: Blockly.WorkspaceSvg | undefined
   let tickTimer: ReturnType<typeof setInterval> | undefined
   let resizeObserver: ResizeObserver | undefined
@@ -349,6 +372,7 @@
     colorScheme = scheme
     document.documentElement.dataset.theme = scheme
     document.documentElement.style.colorScheme = scheme
+    workspace?.setTheme(scheme === 'dark' ? darkBlocklyTheme : scratchBlocklyTheme)
   }
 
   function toggleColorScheme() {
@@ -387,6 +411,19 @@
       size: 12,
     },
     startHats: true,
+  })
+  const darkBlocklyTheme = Blockly.Theme.defineTheme('hikkaku-scratch-dark', {
+    name: 'hikkaku-scratch-dark',
+    base: scratchBlocklyTheme,
+    componentStyles: {
+      workspaceBackgroundColour: '#111827',
+      toolboxBackgroundColour: '#111827',
+      toolboxForegroundColour: '#cbd5e1',
+      flyoutBackgroundColour: '#172033',
+      flyoutForegroundColour: '#cbd5e1',
+      scrollbarColour: '#64748b',
+      insertionMarkerColour: '#ffffff',
+    },
   })
 
   const editorTabs: Array<{ id: EditorTab; label: string; icon: typeof Code2 }> = [
@@ -570,6 +607,12 @@
     costumeEditModeSignature = currentCostumeModeSignature
     costumeEditMode = currentCostume?.dataFormat === 'svg' ? 'vector' : 'bitmap'
   }
+  $: soundSelectionSignature = selectedTarget ? `${selectedTarget.id ?? selectedTarget.name}:${selectedSoundIndex}` : ''
+  $: if (soundSelectionSignature !== previousSoundSelectionSignature) {
+    previousSoundSelectionSignature = soundSelectionSignature
+    soundTrimStart = 0
+    soundTrimEnd = 1
+  }
   $: if (assetSignature !== assetEditorSignature) {
     assetEditorSignature = assetSignature
     refreshAssetEditorPreviews()
@@ -577,7 +620,10 @@
   $: costumeListSignature = selectedTarget ? `${selectedTarget.id ?? selectedTarget.name}:${selectedTarget.costumes.map((costume) => `${costume.name}:${costume.md5ext ?? costume.assetId ?? ''}`).join('|')}` : ''
   $: if (selectedTarget && costumeListSignature !== costumeThumbnailSignature) {
     costumeThumbnailSignature = costumeListSignature
-    refreshCostumeThumbnails(selectedTarget)
+    const targetKey = selectedTarget.id ?? selectedTarget.name
+    const switched = targetKey !== costumeThumbnailTarget
+    costumeThumbnailTarget = targetKey
+    costumeThumbnailThrottle.request(selectedTarget, switched)
   }
   $: targetListSignature = targets.map((target) => {
     const costume = target.costumes[target.currentCostume ?? 0]
@@ -585,7 +631,7 @@
   }).join('|')
   $: if (targetListSignature !== targetThumbnailSignature) {
     targetThumbnailSignature = targetListSignature
-    refreshTargetThumbnails(targets)
+    targetThumbnailThrottle.request(targets)
   }
   $: if (workspace && !selectedExternalTabId && selectedTab === 'code' && selectedTarget) {
     syncSelectedTargetWorkspace(selectedTarget)
@@ -618,6 +664,14 @@
     selectedTarget
     syncRuntimeBlockHighlights()
   }
+  $: if (stageMounted && stageCanvas && stageCanvas !== attachedStageCanvas) {
+    attachedStageCanvas = stageCanvas
+    if (runtimeInWorker) runtimeWorker.attachCanvas(stageCanvas, snapshot)
+    else {
+      renderer.attachCanvas(stageCanvas)
+      renderer.requestDraw(snapshot)
+    }
+  }
   $: if (stageCanvas && !runtimeInWorker && !snapshot.running) renderer.requestDraw(snapshot)
   $: installBrowserTestApi()
 
@@ -634,6 +688,8 @@
     mountBlockly()
     runtimeInWorker = runtimeWorker.attachCanvas(stageCanvas, snapshot)
     if (!runtimeInWorker) renderer.attachCanvas(stageCanvas)
+    attachedStageCanvas = stageCanvas
+    stageMounted = true
     vm.attachRenderer(renderer)
     vm.attachAudioEngine(createRuntimeAudioEngine())
     if (!runtimeInWorker) {
@@ -673,8 +729,10 @@
     runtimeAudioContext?.close().catch(() => undefined)
     if (costumePreviewUrl) URL.revokeObjectURL(costumePreviewUrl)
     costumePreviewSvg = ''
+    costumeThumbnailThrottle.dispose()
+    targetThumbnailThrottle.dispose()
     Object.values(costumeThumbnailUrls).forEach((url) => URL.revokeObjectURL(url))
-    Object.values(targetThumbnailUrls).forEach((url) => URL.revokeObjectURL(url))
+    targetThumbnails.reset()
     window.removeEventListener('keydown', handleKeyDown, { capture: true })
     window.removeEventListener('keyup', handleKeyUp, { capture: true })
     window.removeEventListener('blur', cancelStageSpriteDrag)
@@ -749,11 +807,14 @@
       costumePreviewUrl = ''
     }
     costumePreviewSvg = ''
+    costumeThumbnailThrottle.reset()
+    targetThumbnailThrottle.reset()
+    costumeThumbnailTarget = ''
     revokeObjectUrlMap(costumeThumbnailUrls)
     costumeThumbnailUrls = {}
+    costumeThumbnailEntries = {}
     costumeThumbnailSignature = ''
-    revokeObjectUrlMap(targetThumbnailUrls)
-    targetThumbnailUrls = {}
+    targetThumbnails.reset()
     targetThumbnailSignature = ''
     targetListSignature = ''
     selectedSoundIndex = 0
@@ -1943,7 +2004,9 @@
       skipNextBitmapCanvasReloadKey = ''
     } else {
       skipNextBitmapCanvasReloadKey = ''
-      await loadCostumeIntoBitmapCanvas(bytes, costume.dataFormat ?? '', revision)
+      // Vector editing renders the SVG directly. Rasterizing it into the hidden
+      // bitmap canvas on every edit is expensive; conversion rasterizes on demand.
+      if (costume.dataFormat !== 'svg') await loadCostumeIntoBitmapCanvas(bytes, costume.dataFormat ?? '', revision)
     }
   }
 
@@ -2009,56 +2072,60 @@
 
   async function refreshCostumeThumbnails(target: ScratchTarget) {
     const revision = assetPreviewRevision
-    const nextUrls: Record<string, string> = {}
+    const request = ++costumeThumbnailRequest
+    const nextEntries: Record<string, CostumeThumbnailEntry> = {}
+    const createdUrls: string[] = []
     await Promise.all(target.costumes.map(async (costume, index) => {
       const key = costume.md5ext ?? costume.assetId
-      const bytes = key ? await vm.loadAsset(key, costume.dataFormat ?? '') : undefined
-      if (revision !== assetPreviewRevision) return
-      if (!bytes) return
-      const urlKey = `${target.id ?? target.name}:${index}:${key}`
-      const type = costume.dataFormat === 'svg' ? 'image/svg+xml' : costume.dataFormat === 'jpg' ? 'image/jpeg' : costume.dataFormat === 'png' ? 'image/png' : 'application/octet-stream'
-      nextUrls[urlKey] = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }))
+      if (!key) return
+      const slot = costumeThumbnailKey(target, costume, index)
+      const assetKey = `${key}:${costume.dataFormat ?? ''}`
+      const previous = costumeThumbnailEntries[slot]
+      if (previous?.assetKey === assetKey) {
+        nextEntries[slot] = previous
+        return
+      }
+      const bytes = await vm.loadAsset(key, costume.dataFormat ?? '')
+      if (request !== costumeThumbnailRequest || revision !== assetPreviewRevision) return
+      const url = bytes ? await loadCostumeThumbnail(bytes, costume.dataFormat ?? '') : undefined
+      if (!url) {
+        if (previous) nextEntries[slot] = previous
+        return
+      }
+      createdUrls.push(url)
+      nextEntries[slot] = { assetKey, url }
     }))
-    if (revision !== assetPreviewRevision) {
-      revokeObjectUrlMap(nextUrls)
+    if (request !== costumeThumbnailRequest || revision !== assetPreviewRevision) {
+      createdUrls.forEach((url) => URL.revokeObjectURL(url))
       return
     }
-    for (const [key, url] of Object.entries(costumeThumbnailUrls)) {
-      if (!nextUrls[key]) URL.revokeObjectURL(url)
+    const previousEntries = costumeThumbnailEntries
+    costumeThumbnailEntries = nextEntries
+    costumeThumbnailUrls = thumbnailUrls(nextEntries)
+    await tick()
+    const retained = new Set(Object.values(nextEntries).map((entry) => entry.url))
+    for (const entry of Object.values(previousEntries)) {
+      if (!retained.has(entry.url)) URL.revokeObjectURL(entry.url)
     }
-    costumeThumbnailUrls = nextUrls
   }
 
-  async function refreshTargetThumbnails(items: ScratchTarget[]) {
-    const revision = assetPreviewRevision
-    const nextUrls: Record<string, string> = {}
-    await Promise.all(items.map(async (target) => {
+  function refreshTargetThumbnails(items: ScratchTarget[]) {
+    const sources = items.flatMap((target) => {
       const costume = target.costumes[target.currentCostume ?? 0]
       const key = costume?.md5ext ?? costume?.assetId
-      const bytes = key ? await vm.loadAsset(key, costume?.dataFormat ?? '') : undefined
-      if (revision !== assetPreviewRevision) return
-      if (!costume || !bytes) return
-      const urlKey = targetThumbnailKey(target)
-      const type = costume.dataFormat === 'svg' ? 'image/svg+xml' : costume.dataFormat === 'jpg' ? 'image/jpeg' : costume.dataFormat === 'png' ? 'image/png' : 'application/octet-stream'
-      nextUrls[urlKey] = URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type }))
-    }))
-    if (revision !== assetPreviewRevision) {
-      revokeObjectUrlMap(nextUrls)
-      return
-    }
-    for (const [key, url] of Object.entries(targetThumbnailUrls)) {
-      if (!nextUrls[key]) URL.revokeObjectURL(url)
-    }
-    targetThumbnailUrls = nextUrls
+      if (!costume || !key) return []
+      const format = costume.dataFormat ?? ''
+      return [{ slot: targetThumbnailKey(target), assetKey: `${key}:${format}`, key, format }]
+    })
+    return targetThumbnails.refresh(sources)
   }
 
-  function costumeThumbnailKey(target: ScratchTarget, costume: ScratchCostume, index: number) {
-    return `${target.id ?? target.name}:${index}:${costume.md5ext ?? costume.assetId ?? ''}`
+  function costumeThumbnailKey(target: ScratchTarget, _costume: ScratchCostume, index: number) {
+    return `${target.id ?? target.name}:${index}`
   }
 
   function targetThumbnailKey(target: ScratchTarget) {
-    const costume = target.costumes[target.currentCostume ?? 0]
-    return `${target.id ?? target.name}:${target.currentCostume}:${costume?.md5ext ?? costume?.assetId ?? ''}`
+    return `${target.id ?? target.name}`
   }
 
   function costumeDisplaySize(target: ScratchTarget | undefined, costume: ScratchCostume) {
@@ -2141,9 +2208,7 @@
     const loaded = target.sounds[selectedSoundIndex] ? await editableSoundBuffer(target, selectedSoundIndex) : undefined
     if (revision !== assetPreviewRevision) return
     soundWaveform = loaded ? wavPeaks(loaded.wav, 64) : []
-    soundTrimStart = 0
-    soundTrimEnd = 1
-    soundPlayhead = 0
+    if (!previewAudio) soundPlayhead = 0
   }
 
   async function fillCurrentCostume() {
@@ -2201,8 +2266,9 @@
     const width = 480
     const height = 360
     const paint = vectorPaintStyle(width, height)
-    const path = await vectorBrushPathData(points, strokeColor, strokeWidth)
-    const shape = `${paint.defs}${vectorBrushMarkup({ path, strokeColor, strokeWidth, opacity: vectorOpacity })}`
+    const shape = points.length === 1
+      ? `${paint.defs}<circle cx="${points[0].x}" cy="${points[0].y}" r="${Math.max(1, strokeWidth) / 2}" fill="${strokeColor}" opacity="${Math.max(0, Math.min(1, vectorOpacity / 100))}"/>`
+      : `${paint.defs}${vectorBrushMarkup({ path: await vectorBrushPathData(points, strokeColor, strokeWidth), strokeColor, strokeWidth, opacity: vectorOpacity })}`
     const svg = await svgWithInsertedShape(selectedTarget, index, shape, 'append')
     await updateVectorCostumeFromEditor(selectedTarget, index, svg)
     vectorObjects = await paperVectorObjectList(svg)
@@ -2600,8 +2666,7 @@
     const element = editableSvgChildren(svg)[objectIndex]
     if (!element) return
     await resizeVectorElementBy(element, handle, dx, dy)
-    const nextSvg = await updateVectorCostumeFromEditor(selectedTarget, source.costumeIndex, new XMLSerializer().serializeToString(doc.documentElement))
-    vectorObjects = await paperVectorObjectList(nextSvg)
+    await updateVectorCostumeFromEditor(selectedTarget, source.costumeIndex, new XMLSerializer().serializeToString(doc.documentElement))
     selectedVectorObjectIndex = objectIndex
     selectedVectorObjectIndices = [objectIndex]
     await refreshCostumePreview(vm.getTarget(source.targetName) ?? selectedTarget)
@@ -3003,7 +3068,7 @@
     bitmapSelection = undefined
   }
 
-  async function beginBitmapPaint(event: MouseEvent) {
+  function beginBitmapPaint(event: MouseEvent) {
     const context = bitmapCanvas?.getContext('2d')
     const point = bitmapPoint(event)
     if (!pointInBitmapWorkspace(point)) return
@@ -3032,7 +3097,7 @@
       floodFillBitmap(event)
       isBitmapPainting = false
       bitmapStart = undefined
-      await saveBitmapCostume('Bitmap fill saved')
+      void saveBitmapCostume('Bitmap fill saved')
       return
     }
     if (bitmapTool === 'text') {
@@ -3041,11 +3106,13 @@
       bitmapStart = undefined
       bitmapPreviewBase = undefined
       bitmapPaperPoints = []
-      await saveBitmapCostume('Bitmap text saved')
+      void saveBitmapCostume('Bitmap text saved')
       return
     }
     if (bitmapTool === 'brush' || bitmapTool === 'eraser' || bitmapTool === 'line' || bitmapTool === 'rect' || bitmapTool === 'oval') {
-      await ensureBitmapPaperScope()
+      void ensureBitmapPaperScope().then(() => {
+        if (isBitmapPainting && (bitmapTool === 'brush' || bitmapTool === 'eraser')) drawBitmapPaperStroke()
+      })
     }
     paintBitmap(event)
   }
@@ -3069,7 +3136,8 @@
     }
     if (bitmapTool !== 'brush' && bitmapTool !== 'eraser') return
     const { x, y } = clampBitmapPoint(bitmapPoint(event))
-    bitmapPaperPoints = [...bitmapPaperPoints, { x, y }]
+    const last = bitmapPaperPoints.at(-1)
+    if (!last || last.x !== x || last.y !== y) bitmapPaperPoints = [...bitmapPaperPoints, { x, y }]
     drawBitmapPaperStroke()
   }
 
@@ -3093,6 +3161,14 @@
       const point = clampBitmapPoint(bitmapPoint(event))
       const dragged = Math.abs(point.x - bitmapStart.x) > 2 || Math.abs(point.y - bitmapStart.y) > 2
       bitmapSelection = dragged ? bitmapRect(bitmapStart, point) : bitmapOpaqueSelectionFromPoint(point)
+    }
+    if (bitmapTool === 'brush' || bitmapTool === 'eraser') {
+      const point = clampBitmapPoint(bitmapPoint(event))
+      if (Math.hypot(point.x - bitmapPaperPoints.at(-1)!.x, point.y - bitmapPaperPoints.at(-1)!.y) > 0.5) {
+        bitmapPaperPoints = [...bitmapPaperPoints, point]
+      }
+      await ensureBitmapPaperScope()
+      drawBitmapPaperStroke()
     }
     if (bitmapTool === 'line' || bitmapTool === 'rect' || bitmapTool === 'oval') drawBitmapShape(event, true)
     isBitmapPainting = false
@@ -3180,7 +3256,7 @@
   function drawBitmapPaperStroke() {
     const context = bitmapCanvas?.getContext('2d')
     const scope = bitmapPaperScope
-    if (!context || !scope || bitmapPaperPoints.length === 0) return
+    if (!context || bitmapPaperPoints.length === 0) return
     restoreBitmapPreviewBase()
     context.save()
     context.globalCompositeOperation = bitmapTool === 'eraser' ? 'destination-out' : 'source-over'
@@ -3188,20 +3264,26 @@
     context.lineWidth = bitmapTool === 'eraser' ? brushSize * 3.4 : brushSize * 2
     context.lineCap = 'round'
     context.lineJoin = 'round'
-    const path = new scope.Path()
-    for (const point of bitmapPaperPoints) path.add(new scope.Point(point.x, point.y))
-    if (path.segments.length === 1) {
+    if (bitmapPaperPoints.length === 1) {
       const [point] = bitmapPaperPoints
       context.beginPath()
       context.arc(point.x, point.y, context.lineWidth / 2, 0, Math.PI * 2)
       if (bitmapTool === 'eraser') context.fillStyle = '#000'
       else context.fillStyle = paintColor
       context.fill()
-    } else {
+    } else if (scope) {
+      const path = new scope.Path()
+      for (const point of bitmapPaperPoints) path.add(new scope.Point(point.x, point.y))
       if (path.segments.length > 2) path.smooth({ type: 'continuous' })
       drawPaperPathOnCanvas(context, path)
+      path.remove()
+    } else {
+      // Show the stroke immediately while Paper.js is still loading.
+      context.beginPath()
+      context.moveTo(bitmapPaperPoints[0].x, bitmapPaperPoints[0].y)
+      for (const point of bitmapPaperPoints.slice(1)) context.lineTo(point.x, point.y)
+      context.stroke()
     }
-    path.remove()
     context.restore()
   }
 
@@ -3895,7 +3977,9 @@
     if (!sound || !loaded) return
     selectedSoundIndex = editIndex
     await captureSoundHistory(target, editIndex, loaded.original)
-    const edited = transformWavBytes(loaded.wav, effect, soundTrimStart, soundTrimEnd, (message) => {
+    const selectionStart = soundTrimStart
+    const selectionEnd = soundTrimEnd
+    const edited = transformWavBytes(loaded.wav, effect, selectionStart, selectionEnd, (message) => {
       status = message
     })
     await vm.updateSoundBuffer(target.name, editIndex, edited, {
@@ -3904,6 +3988,11 @@
       rate: wavSampleRate(edited),
       sampleCount: Math.max(0, Math.floor((edited.length - 44) / 2)),
     })
+    if (selectedTarget?.name === target.name && selectedSoundIndex === editIndex && soundTrimStart === selectionStart && soundTrimEnd === selectionEnd) {
+      const selection = selectionAfterTransform(loaded.wav, edited, selectionStart, selectionEnd)
+      soundTrimStart = selection.start
+      soundTrimEnd = selection.end
+    }
     await refreshSoundWaveform(target)
     status = `Sound ${effect}`
   }
@@ -4141,6 +4230,9 @@
   async function previewSound(index: number) {
     if (!selectedTarget) return
     stopPreviewSound()
+    const request = previewRequest
+    const selectionStart = Math.min(soundTrimStart, soundTrimEnd)
+    const selectionEnd = Math.max(soundTrimStart, soundTrimEnd)
     const context = ensurePreviewAudioContext()
     void context.resume()
     const target = vm.getTarget(selectedTarget.name)
@@ -4148,31 +4240,36 @@
     const editIndex = index
     const sound = target.sounds[editIndex]
     const loaded = await editableSoundBuffer(target, editIndex)
-    if (!sound || !loaded) return
+    if (!sound || !loaded || request !== previewRequest) return
     selectedSoundIndex = editIndex
-    const range = soundSelectionByteRange(loaded.wav)
-    const playBytes = range.start > 44 || range.end < loaded.wav.length ? wavWithSamples(loaded.wav, loaded.wav.slice(range.start, range.end)) : loaded.wav
+    const range = wavSelectionByteRange(loaded.wav, selectionStart, selectionEnd)
+    const sampleBytes = Math.max(1, loaded.wav.length - 44)
+    const playBytes = extractSoundSelection(loaded.wav, selectionStart, selectionEnd)
     try {
       const audioBytes = new Uint8Array(playBytes)
       const buffer = await context.decodeAudioData(audioBytes.buffer)
+      if (request !== previewRequest) return
       const source = context.createBufferSource()
       source.buffer = buffer
       source.connect(context.destination)
-      previewSelectionStart = Math.min(soundTrimStart, soundTrimEnd)
-      previewSelectionEnd = Math.max(soundTrimStart, soundTrimEnd)
+      previewSelectionStart = (range.start - 44) / sampleBytes
+      previewSelectionEnd = (range.end - 44) / sampleBytes
       previewAudioDuration = buffer.duration
       previewAudioStartedAt = context.currentTime
+      soundPlayhead = previewSelectionStart
       previewAudio = source
-      previewPlayheadTimer = setInterval(updatePreviewPlayhead, 33)
+      previewPlayheadTimer = setInterval(updatePreviewPlayhead, 16)
       source.onended = stopPreviewSound
-      source.start()
+      source.start(previewAudioStartedAt)
     } catch (error) {
+      if (request !== previewRequest) return
       status = error instanceof Error ? error.message : 'Could not play sound'
       stopPreviewSound()
     }
   }
 
   function stopPreviewSound() {
+    previewRequest += 1
     if (previewPlayheadTimer) {
       clearInterval(previewPlayheadTimer)
       previewPlayheadTimer = undefined
@@ -4523,7 +4620,7 @@
     workspace = Blockly.inject(blocklyHost, {
       toolbox: makeToolbox(selectedTarget, project.extensions, stage, targets, project.monitors),
       renderer: 'zelos',
-      theme: scratchBlocklyTheme,
+      theme: colorScheme === 'dark' ? darkBlocklyTheme : scratchBlocklyTheme,
       trashcan: true,
       scrollbars: true,
       sounds: false,

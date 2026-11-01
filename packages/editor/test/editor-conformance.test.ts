@@ -59,6 +59,7 @@ const visualSourceSignals = [
   ['paint color input', 'aria-label="Paint color"'],
   ['vector object resize label', 'aria-label="Resize selected vector object"'],
   ['sound selection handles', 'aria-label="Move selection start"'],
+  ['costume checkerboard painted as CSS', 'conic-gradient(#e8eef7'],
 ]
 
 describe('editor browser conformance', () => {
@@ -88,6 +89,23 @@ describe('editor browser conformance', () => {
     await context?.close()
     await browser?.close()
     server?.kill()
+  })
+
+  it('keeps Blockly input values readable in dark mode', async () => {
+    const currentPage = requirePage()
+    const colors = await currentPage.evaluate(() => {
+      const root = document.documentElement
+      const previousTheme = root.dataset.theme
+      root.dataset.theme = 'dark'
+      const value = document.querySelector('.blocklyInputField > .blocklyText')
+      const label = document.querySelector('.blocklyLabelField > .blocklyText')
+      const dropdown = document.querySelector('.blocklyDropdownField > .blocklyText')
+      const result = [value, label, dropdown].map((element) => element && getComputedStyle(element).fill)
+      if (previousTheme === undefined) delete root.dataset.theme
+      else root.dataset.theme = previousTheme
+      return result
+    })
+    expect(colors).toEqual(['rgb(87, 94, 117)', 'rgb(248, 250, 252)', 'rgb(248, 250, 252)'])
   })
 
   it('keeps required workflow regions wired in source and production assets', () => {
@@ -178,6 +196,81 @@ describe('editor browser conformance', () => {
     await currentPage.getByTestId('asset-tab-code').click()
     expect(await selectedTab(currentPage)).toBe('code')
     expect(await currentPage.getByTestId('blockly-host').locator('.blocklySvg').count()).toBeGreaterThan(0)
+  })
+
+  it('keeps the costume checkerboard while dragging artwork', async () => {
+    const currentPage = requirePage()
+    await currentPage.setViewportSize({ width: 1280, height: 800 })
+    await currentPage.goto(baseUrl, { waitUntil: 'networkidle' })
+    await currentPage.getByTestId('stage-canvas').waitFor({ state: 'visible' })
+    await currentPage.getByTestId('main-tab-costumes').click()
+
+    const surface = currentPage.getByTestId('costume-paint-surface')
+    await surface.waitFor({ state: 'visible' })
+    const checkerboard = () => surface.evaluate((element) => getComputedStyle(element).backgroundImage)
+    expect(await checkerboard()).toContain('conic-gradient')
+    // The checkerboard must not live on a canvas: painting it there let the runtime
+    // clear it mid-drag, which dropped the background until the pointer was released.
+    expect(await surface.evaluate((element) => element.querySelectorAll('canvas').length)).toBe(1)
+
+    const object = currentPage.locator('[data-vector-object]:not([data-vector-path-point])').first()
+    const box = await object.boundingBox()
+    if (!box) throw new Error('Missing vector object bounds')
+    await currentPage.mouse.move(box.x + box.width / 2, box.y + box.height / 2)
+    await currentPage.mouse.down()
+    try {
+      await currentPage.mouse.move(box.x + box.width / 2 + 36, box.y + box.height / 2 + 24, { steps: 6 })
+      expect(await checkerboard()).toContain('conic-gradient')
+    } finally {
+      await currentPage.mouse.up()
+    }
+  })
+
+  it('does not rasterize vector previews into the bitmap editing canvas', async () => {
+    const currentPage = requirePage()
+    await currentPage.goto(baseUrl, { waitUntil: 'networkidle' })
+    await currentPage.evaluate(() => {
+      const original = CanvasRenderingContext2D.prototype.drawImage
+      ;(window as any).__bitmapPreviewDraws = 0
+      CanvasRenderingContext2D.prototype.drawImage = function (...args: Parameters<typeof original>) {
+        if (this.canvas.dataset.testid === 'bitmap-editor-canvas') (window as any).__bitmapPreviewDraws++
+        return original.apply(this, args)
+      } as typeof original
+    })
+    await currentPage.getByTestId('main-tab-costumes').click()
+    await currentPage.locator('[data-vector-object]:not([data-vector-path-point])').first().waitFor({ state: 'visible' })
+    expect(await currentPage.evaluate(() => (window as any).__bitmapPreviewDraws)).toBe(0)
+  })
+
+  it('keeps a vector brush stroke active while dragging with touch', async () => {
+    const currentPage = requirePage()
+    await currentPage.setViewportSize({ width: 1280, height: 800 })
+    await currentPage.goto(baseUrl, { waitUntil: 'networkidle' })
+    await currentPage.getByTestId('main-tab-costumes').click()
+    const surface = currentPage.getByTestId('costume-paint-surface')
+    await surface.getByTestId('bitmap-editor-canvas').waitFor({ state: 'attached' })
+    await currentPage.getByRole('button', { name: 'Brush', exact: true }).click()
+    expect(await surface.evaluate((element) => getComputedStyle(element).touchAction)).toBe('none')
+    const box = await surface.boundingBox()
+    if (!box) throw new Error('Missing costume paint surface')
+    const session = await currentPage.context().newCDPSession(currentPage)
+    await session.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 1 })
+    try {
+      const x = box.x + box.width / 2
+      const y = box.y + box.height / 2
+      await session.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] })
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + 35, y: y + 25 }] })
+      const preview = surface.getByTestId('vector-brush-preview')
+      await preview.locator('polyline').waitFor({ state: 'attached' })
+      await session.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: x + 70, y: y + 50 }] })
+      await currentPage.waitForFunction(() => (document.querySelector('[data-testid="vector-brush-preview"] polyline')?.getAttribute('points') ?? '').trim().split(/\s+/).length >= 3)
+      const points = await preview.locator('polyline').getAttribute('points')
+      expect((points ?? '').trim().split(/\s+/).length).toBeGreaterThanOrEqual(3)
+      await session.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] })
+    } finally {
+      await session.send('Emulation.setTouchEmulationEnabled', { enabled: false })
+      await session.detach()
+    }
   })
 
   it('fullscreen stage control expands the stage pane instead of the code workspace', async () => {

@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Blocks, Bug, ChevronDown, Download, FileText, Flag, FolderOpen, Lightbulb, Moon, Pencil, Plus, Settings, Square, StepForward, Sun, Zap } from 'lucide-svelte'
+  import { Blocks, ChevronDown, Download, FileText, Flag, FolderOpen, Moon, Pencil, Plus, Settings, Square, StepForward, Sun, Zap } from 'lucide-svelte'
   import type { RuntimeSnapshot } from '@hikkaku/vm'
   import type { EditorHeaderButton, EditorHeaderConfig, EditorHeaderLogo } from '../lib/editor-context'
 
@@ -69,7 +69,7 @@
 
 <header class="relative z-40 flex h-[52px] shrink-0 items-center border-b border-[#774dc5] bg-[#855cd6] text-white shadow-sm">
   <div class="flex h-full min-w-max flex-1 items-center">
-    <div class="flex h-full w-[108px] items-center justify-center border-r border-white/10">
+    <div class="flex h-full w-[136px] items-center justify-center border-r border-white/10">
       {#if header.logo?.element}
         {#if header.logo.href}
           <a class="header-logo-slot" href={header.logo.href} target={header.logo.target} rel={headerRel(header.logo)} title={header.logo.title ?? projectTitle} onclick={(event) => followHeaderAction(header.logo, event)} use:mountElement={header.logo.element}></a>
@@ -79,19 +79,19 @@
           <div class="header-logo-slot" title={header.logo.title ?? projectTitle} use:mountElement={header.logo.element}></div>
         {/if}
       {:else if header.logo?.href}
-        <a class="scratch-wordmark" href={header.logo.href} target={header.logo.target} rel={headerRel(header.logo)} title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'Scratch'))} onclick={(event) => followHeaderAction(header.logo, event)}>
+        <a class="scratch-wordmark" href={header.logo.href} target={header.logo.target} rel={headerRel(header.logo)} title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'xyo-editor'))} onclick={(event) => followHeaderAction(header.logo, event)}>
           <Blocks size={16} aria-hidden="true" />
-          <span>{header.logo.label ?? 'SCRATCH'}</span>
+          <span>{header.logo.label ?? 'xyo-editor'}</span>
         </a>
       {:else if header.logo?.onClick}
-        <button class="scratch-wordmark" type="button" title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'Scratch'))} onclick={(event) => followHeaderAction(header.logo, event)}>
+        <button class="scratch-wordmark" type="button" title={header.logo.title ?? (projectTitle || (header.logo.label ?? 'xyo-editor'))} onclick={(event) => followHeaderAction(header.logo, event)}>
           <Blocks size={16} aria-hidden="true" />
-          <span>{header.logo.label ?? 'SCRATCH'}</span>
+          <span>{header.logo.label ?? 'xyo-editor'}</span>
         </button>
       {:else}
-        <div class="scratch-wordmark" title={header.logo?.title ?? (projectTitle || (header.logo?.label ?? 'Scratch'))}>
+        <div class="scratch-wordmark" title={header.logo?.title ?? (projectTitle || (header.logo?.label ?? 'xyo-editor'))}>
           <Blocks size={16} aria-hidden="true" />
-          <span>{header.logo?.label ?? 'SCRATCH'}</span>
+          <span>{header.logo?.label ?? 'xyo-editor'}</span>
         </div>
       {/if}
     </div>
@@ -176,17 +176,6 @@
         </div>
       </details>
 
-      <div class="mx-3 h-full w-px bg-white/10"></div>
-
-      <button class="menu-trigger" type="button">
-        <Lightbulb size={22} strokeWidth={3} />
-        <span>チュートリアル</span>
-      </button>
-
-      <button class="menu-trigger" type="button" onclick={stepRuntime}>
-        <Bug size={22} strokeWidth={3} />
-        <span>デバッグ</span>
-      </button>
     </nav>
   </div>
 
@@ -319,6 +308,36 @@
     position: absolute;
     top: 100%;
     z-index: 60;
+  }
+
+  /* Native details keeps its keyboard semantics while animating the panel. */
+  .menu[open] > .menu-panel {
+    animation: menu-enter 140ms ease-out both;
+  }
+
+  @keyframes menu-enter {
+    from { opacity: 0; transform: translateY(-4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  @supports (transition-behavior: allow-discrete) and selector(::details-content) {
+    .menu::details-content {
+      opacity: 0;
+      transform: translateY(-4px);
+      transition: opacity 140ms ease, transform 140ms ease, content-visibility 140ms allow-discrete;
+    }
+
+    .menu[open]::details-content {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .menu[open] > .menu-panel { animation: none; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .menu[open] > .menu-panel { animation: none; }
+    .menu::details-content { transition: none; }
   }
 
   .menu-item {

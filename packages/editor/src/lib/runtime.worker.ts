@@ -8,6 +8,7 @@ import {
 type RuntimeWorkerCommand =
   | { type: 'init'; canvas: OffscreenCanvas; snapshot: RuntimeSnapshot; assets: Record<string, Uint8Array>; images?: WorkerCostumeImage[]; syncId: number }
   | { type: 'sync'; snapshot: RuntimeSnapshot; assets: Record<string, Uint8Array>; images?: WorkerCostumeImage[]; syncId: number }
+  | { type: 'attachCanvas'; canvas: OffscreenCanvas }
   | { type: 'cacheImages'; images?: WorkerCostumeImage[]; syncId?: number }
   | { type: 'resize'; width: number; height: number }
   | { type: 'greenFlag'; images?: WorkerCostumeImage[]; syncId?: number }
@@ -153,6 +154,10 @@ self.onmessage = async (event: MessageEvent<RuntimeWorkerCommand>) => {
         renderer.requestDraw?.(vm.lightweightSnapshot())
         applyingHostSnapshot = false
         postRuntimeSnapshot('WORKER_READY', command.syncId)
+        break
+      case 'attachCanvas':
+        renderer.attachCanvas(command.canvas)
+        renderer.requestDraw(vm.lightweightSnapshot())
         break
       case 'sync':
         applyingHostSnapshot = true

@@ -3,16 +3,15 @@
   "private": true,
   "type": "module",
   "module": "index.ts",
-  "workspaces": ["packages/*"],
   "scripts": {
-    "dev": "bun --cwd packages/editor dev",
-    "build": "bun --cwd packages/vm build && bun --cwd packages/editor build",
-    "check": "bun --cwd packages/vm check && bun --cwd packages/editor check",
-    "test": "bun --cwd packages/vm test",
-    "test:compat": "bun --cwd packages/vm test:compat",
-    "test:performance": "bun --cwd packages/vm test:performance",
-    "test:browser": "bun --cwd packages/editor test:browser",
-    "test:visual": "bun --cwd packages/editor test:visual",
+    "dev": "pnpm --filter xyo-editor dev",
+    "build": "pnpm --filter @hikkaku/vm build && pnpm --filter xyo-editor build",
+    "check": "pnpm --filter @hikkaku/vm check && pnpm --filter xyo-editor check",
+    "test": "pnpm --filter @hikkaku/vm test",
+    "test:compat": "pnpm --filter @hikkaku/vm test:compat",
+    "test:performance": "pnpm --filter @hikkaku/vm test:performance",
+    "test:browser": "pnpm --filter xyo-editor test:browser",
+    "test:visual": "pnpm --filter xyo-editor test:visual",
     "fmt": "vp check --fix",
     "lint": "vp check"
   },
@@ -24,5 +23,6 @@
   },
   "peerDependencies": {
     "typescript": "^5"
-  }
+  },
+  "packageManager": "pnpm@12.6.0"
 }

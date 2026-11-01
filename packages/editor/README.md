@@ -10,9 +10,9 @@ asset import, and VM event binding.
 ## Development
 
 ```sh
-bun run dev
-bun run check
-bun run build
+pnpm dev
+pnpm check
+pnpm build
 ```
 
 The primary application shell lives in `src/App.svelte`.

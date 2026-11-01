@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Mic, Paintbrush, Plus, Search, Sparkles, Trash2, Upload, Volume2 } from 'lucide-svelte'
+  import { menuTransition } from '../../lib/menu-transition'
   import type { ScratchCostume, ScratchSound, ScratchTarget } from '@hikkaku/vm'
   import type { AssetHistoryEntry, EditorTab, LibraryPanel, SoundEffect } from '../../lib/editor-types'
   import type { costumeLibrary, soundLibrary } from '../../lib/editor-libraries'
@@ -187,7 +188,7 @@
       <div class="sticky bottom-3 mt-auto flex justify-center">
         <div class="relative">
           {#if costumeAddMenuOpen}
-            <div class="asset-add-menu absolute bottom-14 left-1/2 z-20 w-44 -translate-x-1/2 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-left shadow-xl" role="menu" aria-label="Costume options">
+            <div class="asset-add-menu absolute bottom-14 left-1/2 z-20 w-44 -translate-x-1/2 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-left shadow-xl" transition:menuTransition role="menu" aria-label="Costume options">
               <button data-testid="choose-costume-library" class="asset-add-menu-item" type="button" role="menuitem" onclick={chooseCostumeFromLibrary}>
                 <Search size={16} />
                 <span>Choose costume</span>
@@ -278,7 +279,7 @@
       <div class="sticky bottom-3 mt-auto flex justify-center">
         <div class="relative">
           {#if soundAddMenuOpen}
-            <div class="absolute bottom-14 left-1/2 z-20 w-44 -translate-x-1/2 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-left shadow-xl" role="menu" aria-label="Sound options">
+            <div class="absolute bottom-14 left-1/2 z-20 w-44 -translate-x-1/2 overflow-hidden rounded-md border border-slate-200 bg-white py-1 text-left shadow-xl" transition:menuTransition role="menu" aria-label="Sound options">
               <button data-testid="choose-sound-library" class="asset-add-menu-item" type="button" role="menuitem" onclick={chooseSoundFromLibrary}>
                 <Search size={16} />
                 <span>Choose sound</span>

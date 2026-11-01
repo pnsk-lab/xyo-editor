@@ -1,5 +1,6 @@
 <script lang="ts">
   import { Flag, Maximize2, Minimize2, Pause, Square } from 'lucide-svelte'
+  import { menuTransition } from '../../lib/menu-transition'
   import type { RuntimeSnapshot } from '@hikkaku/vm'
 
   type Monitor = RuntimeSnapshot['project']['monitors'][number]
@@ -161,7 +162,7 @@
       </button>
     </div>
   </div>
-  <div bind:this={stageFrame} class="relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-[#b8c6d8] bg-white">
+  <div bind:this={stageFrame} class="stage-preview-frame relative aspect-[4/3] w-full overflow-hidden rounded-lg border border-[#b8c6d8] bg-white">
     <canvas
       data-testid="stage-canvas"
       bind:this={stageCanvas}
@@ -231,6 +232,7 @@
       <div
         class="absolute z-30 w-44 overflow-hidden rounded border border-black/15 bg-white py-1 text-[12px] text-[#575e75] shadow-xl"
         style={`left:${monitorContextMenu.x}px;top:${monitorContextMenu.y}px`}
+        transition:menuTransition
         role="menu"
         tabindex="-1"
         aria-label="Monitor options"

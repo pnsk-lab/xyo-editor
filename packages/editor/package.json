@@ -24,8 +24,8 @@
     "pack": "vp pack",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
-    "test:browser": "bun run build && bun test test/editor-conformance.test.ts",
-    "test:visual": "bun run build && bun test test/editor-conformance.test.ts"
+    "test:browser": "pnpm build && bun test test/editor-conformance.test.ts",
+    "test:visual": "pnpm build && bun test test/editor-conformance.test.ts"
   },
   "dependencies": {
     "blockly": "^12.5.1",

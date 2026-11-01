@@ -37,8 +37,18 @@ export class RuntimeWorkerController {
 
   attachCanvas(canvas: HTMLCanvasElement, snapshot: RuntimeSnapshot): boolean {
     if (!RUNTIME_WORKER_ENABLED) return false
-    if (this.initialized || this.transferredCanvas === canvas) return this.initialized
+    if (this.transferredCanvas === canvas) return this.initialized
     if (!('transferControlToOffscreen' in canvas)) return false
+    if (this.initialized) {
+      const offscreen = canvas.transferControlToOffscreen()
+      this.transferredCanvas = canvas
+      const worker = this.worker
+      // Init rasterizes images asynchronously, so enqueue the replacement after init.
+      void this.initPosted?.then(() => {
+        if (this.worker === worker) worker?.postMessage({ type: 'attachCanvas', canvas: offscreen }, [offscreen])
+      })
+      return true
+    }
     this.worker = new Worker(new URL('./runtime.worker.ts', import.meta.url), { type: 'module' })
     this.worker.onmessage = (event: MessageEvent<RuntimeWorkerEvent>) => {
       const message = event.data

@@ -1,5 +1,6 @@
 <script lang="ts">
   import { tick } from 'svelte'
+  import { menuTransition } from '../../lib/menu-transition'
   import { ArrowLeftRight, Box, Circle, Eye, EyeOff, ImagePlus, MoveVertical, Plus, Shuffle, Sparkles, Trash2, Upload } from 'lucide-svelte'
   import type { ScratchTarget } from '@hikkaku/vm'
   import type { LibraryPanel } from '../../lib/editor-types'
@@ -220,7 +221,7 @@
                 onchange={(event) => updateNumber('direction', event)}
               />
               {#if directionPickerOpen}
-                <div bind:this={directionPicker} class="fixed z-[80] w-[168px] rounded bg-white p-6 shadow-[0_4px_14px_rgb(0_0_0/0.24)]" style={directionPickerStyle} role="dialog" tabindex="-1" aria-label="Direction picker" onmousedown={(event) => event.stopPropagation()}>
+                <div transition:menuTransition bind:this={directionPicker} class="fixed z-[80] w-[168px] rounded bg-white p-6 shadow-[0_4px_14px_rgb(0_0_0/0.24)]" style={directionPickerStyle} role="dialog" tabindex="-1" aria-label="Direction picker" onmousedown={(event) => event.stopPropagation()}>
                   <div
                     class="relative mx-auto h-[120px] w-[120px] cursor-pointer touch-none rounded-full border border-[#d5c4ff] bg-[#eee9fb]"
                     role="slider"
@@ -349,6 +350,7 @@
     <div
       class="fixed z-[80] w-36 rounded-md border border-slate-200 bg-white py-1 text-sm font-semibold shadow-lg"
       style={`left:${spriteContextMenu.x}px;top:${spriteContextMenu.y}px`}
+      transition:menuTransition
       role="menu"
       tabindex="-1"
       onmousedown={(event) => event.stopPropagation()}

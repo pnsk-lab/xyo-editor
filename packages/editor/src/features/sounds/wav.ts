@@ -20,6 +20,15 @@ export function transformWav(bytes: Uint8Array, effect: SoundEffect, trimStart =
   return wavWithSamples(bytes, concatBytes(before, editedSelection, after))
 }
 
+export function selectionAfterTransform(original: Uint8Array, edited: Uint8Array, trimStart: number, trimEnd: number) {
+  const range = soundSelectionByteRange(original, trimStart, trimEnd)
+  const total = Math.max(0, edited.length - 44)
+  if (!total) return { start: 0, end: 1 }
+  const before = range.start - 44
+  const after = original.length - range.end
+  return { start: before / total, end: (total - after) / total }
+}
+
 export function transformWholeWav(bytes: Uint8Array, effect: SoundEffect, onStatus?: (message: string) => void) {
   if (effect === 'trim-start') return trimWav(bytes, 'start')
   if (effect === 'trim-end') return trimWav(bytes, 'end')
@@ -66,6 +75,11 @@ export function soundSelectionByteRange(bytes: Uint8Array, trimStart = 0, trimEn
     start: 44 + startSample * 2,
     end: 44 + Math.max(startSample + (endSample === startSample && samples > 0 ? 1 : 0), endSample) * 2,
   }
+}
+
+export function extractSoundSelection(bytes: Uint8Array, trimStart = 0, trimEnd = 1) {
+  const range = soundSelectionByteRange(bytes, trimStart, trimEnd)
+  return wavWithSamples(bytes, bytes.slice(range.start, range.end))
 }
 
 export function replaceSoundSelection(bytes: Uint8Array, insertSamples: Uint8Array, trimStart = 0, trimEnd = 1) {

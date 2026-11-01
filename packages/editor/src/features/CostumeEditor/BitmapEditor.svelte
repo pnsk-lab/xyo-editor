@@ -1,5 +1,4 @@
 <script lang="ts">
-  import type paperCore from 'paper/dist/paper-core'
   import {
     AlignCenterVertical,
     AlignEndHorizontal,
@@ -26,6 +25,8 @@
     ZoomOut,
   } from 'lucide-svelte'
   import type { BitmapTool, VectorObjectInfo, VectorPathPointInfo, VectorResizeHandle } from '../../lib/editor-types'
+  import VectorBrushPreview from './VectorBrushPreview.svelte'
+  import VectorShapePreview from './VectorShapePreview.svelte'
 
   type CostumeEditMode = 'bitmap' | 'vector'
   type VectorShape = 'rect' | 'oval' | 'line' | 'text'
@@ -39,6 +40,7 @@
   const BITMAP_WORKSPACE_WIDTH = BITMAP_STAGE_WIDTH * BITMAP_WORKSPACE_SCALE
   const BITMAP_WORKSPACE_HEIGHT = BITMAP_STAGE_HEIGHT * BITMAP_WORKSPACE_SCALE
   const VECTOR_WORKSPACE_SCALE = 5
+  const CHECKERBOARD_CELL_SIZE = 10
 
   let {
     bitmapCanvas = $bindable(),
@@ -213,15 +215,16 @@
   let activeViewportKey = ''
   let viewportStates = new Map<string, ViewportState>()
   let viewportNode: HTMLElement | undefined
-  let paperViewportCanvas: HTMLCanvasElement | undefined
-  let paperViewportModule: typeof paperCore | undefined
-  let paperViewportScope: paper.PaperScope | undefined
-  let viewportResizeObserver: ResizeObserver | undefined
   let editSurfaceNode: HTMLElement | undefined
   let vectorMarquee = $state<{ start: { x: number; y: number }; current: { x: number; y: number }; append: boolean } | undefined>()
   let vectorBrushPoints = $state<Array<{ x: number; y: number }>>([])
+  let pendingBrushPreviews = $state<Array<{ id: number; points: Array<{ x: number; y: number }>; color: string; width: number; opacity: number }>>([])
+  let nextBrushPreviewId = 0
   let vectorShapeDraft = $state<{ shape: 'rect' | 'oval' | 'line'; start: { x: number; y: number }; current: { x: number; y: number } } | undefined>()
+  let pendingShapePreviews = $state<Array<{ id: number; shape: 'rect' | 'oval' | 'line'; rect: Rect; color: string; secondaryColor: string; gradient: 'solid' | 'horizontal' | 'vertical' | 'radial'; stroke: string; width: number; opacity: number }>>([])
+  let nextShapePreviewId = 0
   let activeCostumeEditMode = costumeEditMode
+  let activeCanvasPointerId: number | undefined
 
   function clampZoom(value: number) {
     return Math.max(0.25, Math.min(5, value))
@@ -236,7 +239,6 @@
     viewportY = 0
     viewportScale = 1
     saveViewportState()
-    drawPaperViewport()
   }
 
   async function switchCostumeEditMode(nextMode: CostumeEditMode) {
@@ -246,7 +248,6 @@
     switchToolForFormat(nextMode)
     costumeEditMode = nextMode
     activeCostumeEditMode = nextMode
-    drawPaperViewport()
   }
 
   function switchToolForFormat(nextMode: CostumeEditMode) {
@@ -287,13 +288,6 @@
     setViewport(viewportX - event.deltaX, viewportY - event.deltaY, viewportScale)
   }
 
-  function canvasBaseSize(node: HTMLElement) {
-    return {
-      width: editSurfaceWidth(),
-      height: editSurfaceHeight(),
-    }
-  }
-
   function editSurfaceWidth() {
     return costumeEditMode === 'vector' ? BITMAP_WORKSPACE_WIDTH : bitmapCanvasWidth
   }
@@ -307,7 +301,6 @@
     viewportX = x
     viewportY = y
     saveViewportState()
-    drawPaperViewport()
   }
 
   function saveViewportState(key = activeViewportKey) {
@@ -320,97 +313,42 @@
     viewportX = saved.x
     viewportY = saved.y
     viewportScale = saved.scale
-    drawPaperViewport()
   }
 
-  function clampCurrentViewport() {
-    drawPaperViewport()
+  // The transparency checkerboard is plain CSS so that it can never be cleared by
+  // a canvas repaint (or a dropped GPU canvas texture) while dragging artwork.
+  // Cells stay whole pixels and are anchored to the artwork's top-left corner, so
+  // zooming and panning move the pattern exactly like the previous canvas painting.
+  function viewportBackgroundStyle() {
+    const cell = Math.max(2, Math.round(CHECKERBOARD_CELL_SIZE * viewportScale))
+    const period = cell * 2
+    const offsetX = viewportX - (editSurfaceWidth() * viewportScale) / 2 + period / 2
+    const offsetY = viewportY - (editSurfaceHeight() * viewportScale) / 2 + period / 2
+    return `background-color:#ffffff;background-image:conic-gradient(#e8eef7 25%, #ffffff 0 50%, #e8eef7 0 75%, #ffffff 0);background-size:${period}px ${period}px;background-position:calc(50% + ${offsetX}px) calc(50% + ${offsetY}px);`
   }
 
   function viewportWheel(node: HTMLElement) {
     viewportNode = node
-    viewportResizeObserver = new ResizeObserver(clampCurrentViewport)
-    viewportResizeObserver.observe(node)
-    void setupPaperViewport()
-    clampCurrentViewport()
     node.addEventListener('wheel', handleViewportWheel, { passive: false })
-    node.addEventListener('mousedown', handleCanvasMouseDown)
-    node.addEventListener('mousemove', handleCanvasMouseMove)
-    node.addEventListener('mouseup', handleCanvasMouseUp)
-    node.addEventListener('mouseleave', handleCanvasMouseUp)
+    node.addEventListener('pointerdown', handleCanvasPointerDown)
+    node.addEventListener('pointermove', handleCanvasPointerMove)
+    node.addEventListener('pointerup', handleCanvasPointerUp)
+    node.addEventListener('pointercancel', handleCanvasPointerUp)
+    node.addEventListener('lostpointercapture', handleCanvasPointerUp)
     node.addEventListener('dblclick', handleCanvasDoubleClick)
     return {
       destroy() {
+        activeCanvasPointerId = undefined
         node.removeEventListener('wheel', handleViewportWheel)
-        node.removeEventListener('mousedown', handleCanvasMouseDown)
-        node.removeEventListener('mousemove', handleCanvasMouseMove)
-        node.removeEventListener('mouseup', handleCanvasMouseUp)
-        node.removeEventListener('mouseleave', handleCanvasMouseUp)
+        node.removeEventListener('pointerdown', handleCanvasPointerDown)
+        node.removeEventListener('pointermove', handleCanvasPointerMove)
+        node.removeEventListener('pointerup', handleCanvasPointerUp)
+        node.removeEventListener('pointercancel', handleCanvasPointerUp)
+        node.removeEventListener('lostpointercapture', handleCanvasPointerUp)
         node.removeEventListener('dblclick', handleCanvasDoubleClick)
-        viewportResizeObserver?.disconnect()
-        viewportResizeObserver = undefined
-        paperViewportScope?.project?.clear()
-        paperViewportScope = undefined
         if (viewportNode === node) viewportNode = undefined
       },
     }
-  }
-
-  async function setupPaperViewport() {
-    if (!paperViewportCanvas) return
-    if (!paperViewportModule) {
-      const imported = await import('paper/dist/paper-core')
-      paperViewportModule = ('default' in imported ? imported.default : imported) as typeof paperCore
-    }
-    if (!paperViewportScope) {
-      paperViewportScope = new paperViewportModule.PaperScope()
-      paperViewportScope.setup(paperViewportCanvas)
-    }
-    drawPaperViewport()
-  }
-
-  function drawPaperViewport() {
-    const node = viewportNode
-    const canvas = paperViewportCanvas
-    const scope = paperViewportScope
-    if (!node || !canvas || !scope) return
-    const width = Math.max(1, node.clientWidth)
-    const height = Math.max(1, node.clientHeight)
-    const pixelRatio = window.devicePixelRatio || 1
-    const backingWidth = Math.max(1, Math.round(width * pixelRatio))
-    const backingHeight = Math.max(1, Math.round(height * pixelRatio))
-    if (canvas.width !== backingWidth) canvas.width = backingWidth
-    if (canvas.height !== backingHeight) canvas.height = backingHeight
-    scope.view.viewSize = new scope.Size(width, height)
-    scope.project.activeLayer.removeChildren()
-
-    const context = canvas.getContext('2d')
-    if (!context) return
-    context.save()
-    context.setTransform(pixelRatio, 0, 0, pixelRatio, 0, 0)
-    context.clearRect(0, 0, width, height)
-    context.fillStyle = '#ffffff'
-    context.fillRect(0, 0, width, height)
-
-    const base = canvasBaseSize(node)
-    const pixelsPerBitmap = (base.width / Math.max(1, editSurfaceWidth())) * viewportScale
-    const tile = Math.max(2, Math.round(10 * pixelsPerBitmap))
-    const period = tile * 2
-    const originX = Math.round(width / 2 - (base.width * viewportScale) / 2 + viewportX)
-    const originY = Math.round(height / 2 - (base.height * viewportScale) / 2 + viewportY)
-    const startX = originX + Math.floor((0 - originX) / period) * period - period
-    const startY = originY + Math.floor((0 - originY) / period) * period - period
-
-    context.fillStyle = '#e8eef7'
-    for (let y = startY; y < height + period; y += tile) {
-      for (let x = startX; x < width + period; x += tile) {
-        const column = Math.floor((x - originX) / tile)
-        const row = Math.floor((y - originY) / tile)
-        if ((column + row) % 2 !== 0) continue
-        context.fillRect(Math.round(x), Math.round(y), tile, tile)
-      }
-    }
-    context.restore()
   }
 
   function selectionStyle(rect: { x: number; y: number; width: number; height: number }) {
@@ -478,18 +416,23 @@
     return `left:${rect.x * VECTOR_WORKSPACE_SCALE}px;top:${rect.y * VECTOR_WORKSPACE_SCALE}px;width:${rect.width * VECTOR_WORKSPACE_SCALE}px;height:${rect.height * VECTOR_WORKSPACE_SCALE}px;`
   }
 
-  function vectorShapeDraftStyle() {
-    if (!vectorShapeDraft) return ''
-    const rect = normalizedRect(vectorShapeDraft.start, vectorShapeDraft.current)
-    return `left:${rect.x * VECTOR_WORKSPACE_SCALE}px;top:${rect.y * VECTOR_WORKSPACE_SCALE}px;width:${rect.width * VECTOR_WORKSPACE_SCALE}px;height:${rect.height * VECTOR_WORKSPACE_SCALE}px;`
-  }
-
   function vectorPointFromEvent(event: MouseEvent | PointerEvent) {
     const rect = editSurfaceNode?.getBoundingClientRect()
     if (!rect) return undefined
     return {
       x: Math.max(0, Math.min(vectorCanvasWidth, ((event.clientX - rect.left) / rect.width) * vectorCanvasWidth)),
       y: Math.max(0, Math.min(vectorCanvasHeight, ((event.clientY - rect.top) / rect.height) * vectorCanvasHeight)),
+    }
+  }
+
+  function vectorBrushPointFromEvent(event: MouseEvent) {
+    const rect = editSurfaceNode?.getBoundingClientRect()
+    if (!rect) return undefined
+    const x = ((event.clientX - rect.left) / rect.width) * editSurfaceWidth()
+    const y = ((event.clientY - rect.top) / rect.height) * editSurfaceHeight()
+    return {
+      x: Math.max(0, Math.min(vectorCanvasWidth, (x - vectorArtLeft()) / VECTOR_WORKSPACE_SCALE)),
+      y: Math.max(0, Math.min(vectorCanvasHeight, (y - vectorArtTop()) / VECTOR_WORKSPACE_SCALE)),
     }
   }
 
@@ -509,13 +452,13 @@
   }
 
   $effect(() => {
-    if (paperViewportCanvas && viewportNode) void setupPaperViewport()
-  })
-
-  $effect(() => {
     const nextKey = viewportKey || `costume:${currentCostumeIndex}`
     if (nextKey === activeViewportKey) return
     saveViewportState()
+    vectorBrushPoints = []
+    pendingBrushPreviews = []
+    vectorShapeDraft = undefined
+    pendingShapePreviews = []
     activeViewportKey = nextKey
     loadViewportState(nextKey)
   })
@@ -525,6 +468,26 @@
     switchToolForFormat(costumeEditMode)
     activeCostumeEditMode = costumeEditMode
   })
+
+  function handleCanvasPointerDown(event: PointerEvent) {
+    if (event.button !== 0 || activeCanvasPointerId !== undefined) return
+    if (!editSurfaceNode?.contains(event.target as Node)) return
+    if ((event.target as HTMLElement).closest('[data-vector-object]')) return
+    activeCanvasPointerId = event.pointerId
+    viewportNode?.setPointerCapture(event.pointerId)
+    handleCanvasMouseDown(event)
+  }
+
+  function handleCanvasPointerMove(event: PointerEvent) {
+    if (activeCanvasPointerId === event.pointerId) handleCanvasMouseMove(event)
+  }
+
+  function handleCanvasPointerUp(event: PointerEvent) {
+    if (activeCanvasPointerId !== event.pointerId) return
+    activeCanvasPointerId = undefined
+    handleCanvasMouseUp(event)
+    if (viewportNode?.hasPointerCapture(event.pointerId)) viewportNode.releasePointerCapture(event.pointerId)
+  }
 
   function handleCanvasMouseDown(event: MouseEvent) {
     if (costumeEditMode === 'bitmap') return beginBitmapPaint(event)
@@ -537,13 +500,15 @@
         return
       }
       if (vectorTool === 'brush') {
-        vectorBrushPoints = [point]
+        const brushPoint = vectorBrushPointFromEvent(event)
+        if (brushPoint) vectorBrushPoints = [brushPoint]
         return
       }
       if (vectorTool === 'fill') return fillVectorObjectAtPoint(point)
       if (vectorTool === 'eraser') return eraseVectorObjectAtPoint(point)
       if (vectorTool === 'rect' || vectorTool === 'oval' || vectorTool === 'line') {
-        vectorShapeDraft = { shape: vectorTool, start: point, current: point }
+        const shapePoint = vectorBrushPointFromEvent(event)
+        if (shapePoint) vectorShapeDraft = { shape: vectorTool, start: shapePoint, current: shapePoint }
         return
       }
       const x = point.x
@@ -559,7 +524,7 @@
       if (point) vectorMarquee = { ...vectorMarquee, current: point }
     }
     if (costumeEditMode === 'vector' && vectorTool === 'brush' && vectorBrushPoints.length > 0) {
-      const point = vectorPointFromEvent(event)
+      const point = vectorBrushPointFromEvent(event)
       if (point) vectorBrushPoints = [...vectorBrushPoints, point]
     }
     if (costumeEditMode === 'vector' && vectorTool === 'eraser' && event.buttons > 0) {
@@ -567,7 +532,7 @@
       if (point) void eraseVectorObjectAtPoint(point)
     }
     if (costumeEditMode === 'vector' && vectorShapeDraft) {
-      const point = vectorPointFromEvent(event)
+      const point = vectorBrushPointFromEvent(event)
       if (point) vectorShapeDraft = { ...vectorShapeDraft, current: point }
     }
   }
@@ -585,14 +550,23 @@
     if (costumeEditMode === 'vector' && vectorTool === 'brush' && vectorBrushPoints.length > 0) {
       const points = vectorBrushPoints
       vectorBrushPoints = []
-      if (points.length > 1) void saveVectorBrushStroke(points)
+      const id = nextBrushPreviewId++
+      pendingBrushPreviews = [...pendingBrushPreviews, { id, points, color: strokeColor, width: strokeWidth, opacity: vectorOpacity }]
+      void Promise.resolve(saveVectorBrushStroke(points)).finally(() => {
+        pendingBrushPreviews = pendingBrushPreviews.filter((preview) => preview.id !== id)
+      })
     }
     if (costumeEditMode === 'vector' && vectorShapeDraft) {
       const draft = vectorShapeDraft
       vectorShapeDraft = undefined
       const rect = normalizedRect(draft.start, draft.current)
-      if (rect.width > 2 || rect.height > 2) void saveVectorShapeInRect(draft.shape, rect)
-      else void saveVectorCostume(draft.start)
+      if (rect.width > 2 || rect.height > 2) {
+        const id = nextShapePreviewId++
+        pendingShapePreviews = [...pendingShapePreviews, { id, shape: draft.shape, rect, color: paintColor, secondaryColor: secondaryPaintColor, gradient: paintGradient, stroke: strokeColor, width: strokeWidth, opacity: vectorOpacity }]
+        void Promise.resolve(saveVectorShapeInRect(draft.shape, rect)).finally(() => {
+          pendingShapePreviews = pendingShapePreviews.filter((preview) => preview.id !== id)
+        })
+      } else void saveVectorCostume(draft.start)
     }
   }
 
@@ -701,12 +675,13 @@
     </div>
 
     <div
-      class="relative min-w-0 flex-1 overflow-hidden bg-white"
+      data-testid="costume-paint-surface"
+      class="relative min-w-0 flex-1 touch-none overflow-hidden bg-white"
       role="application"
       aria-label="Costume paint canvas"
+      style={viewportBackgroundStyle()}
       use:viewportWheel
     >
-      <canvas bind:this={paperViewportCanvas} class="pointer-events-none absolute inset-0 h-full w-full"></canvas>
       <div
         bind:this={editSurfaceNode}
         data-vector-stage-surface={costumeEditMode === 'vector' ? 'true' : undefined}
@@ -736,6 +711,12 @@
           <div class="pointer-events-none absolute border border-dashed border-blue-500 bg-blue-500/5" style={selectionStyle(bitmapSelection)}></div>
         {/if}
         {#if costumeEditMode === 'vector'}
+          {#each pendingBrushPreviews as preview (preview.id)}
+            <VectorBrushPreview points={preview.points} color={preview.color} width={preview.width} opacity={preview.opacity} scale={VECTOR_WORKSPACE_SCALE} left={vectorArtLeft()} top={vectorArtTop()} />
+          {/each}
+          {#if vectorBrushPoints.length}
+            <VectorBrushPreview points={vectorBrushPoints} color={strokeColor} width={strokeWidth} opacity={vectorOpacity} scale={VECTOR_WORKSPACE_SCALE} left={vectorArtLeft()} top={vectorArtTop()} />
+          {/if}
           {#each vectorObjects as object}
             <button
               data-vector-object
@@ -751,8 +732,11 @@
           {#if vectorMarquee}
             <div class="pointer-events-none absolute border border-dashed border-blue-500 bg-blue-500/10" style={vectorMarqueeStyle()}></div>
           {/if}
+          {#each pendingShapePreviews as preview (preview.id)}
+            <VectorShapePreview shape={preview.shape} rect={preview.rect} color={preview.color} secondaryColor={preview.secondaryColor} gradient={preview.gradient} stroke={preview.stroke} width={preview.width} opacity={preview.opacity} left={vectorArtLeft()} top={vectorArtTop()} scale={VECTOR_WORKSPACE_SCALE} />
+          {/each}
           {#if vectorShapeDraft}
-            <div class={`pointer-events-none absolute border-2 border-blue-500 bg-blue-500/5 ${vectorShapeDraft.shape === 'oval' ? 'rounded-full' : ''}`} style={vectorShapeDraftStyle()}></div>
+            <VectorShapePreview shape={vectorShapeDraft.shape} rect={normalizedRect(vectorShapeDraft.start, vectorShapeDraft.current)} color={paintColor} secondaryColor={secondaryPaintColor} gradient={paintGradient} stroke={strokeColor} width={strokeWidth} opacity={vectorOpacity} left={vectorArtLeft()} top={vectorArtTop()} scale={VECTOR_WORKSPACE_SCALE} />
           {/if}
           {#if vectorTool === 'reshape' && beginVectorPathPointDrag && selectedVectorObject()?.points?.length}
             {@const selectedObject = selectedVectorObject()!}
