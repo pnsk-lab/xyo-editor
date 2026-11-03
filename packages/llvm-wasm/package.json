@@ -1,0 +1,14 @@
+{
+  "name": "@hikkaku/llvm-wasm",
+  "private": true,
+  "license": "MIT",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "test": "bun test ./tests"
+  }
+}

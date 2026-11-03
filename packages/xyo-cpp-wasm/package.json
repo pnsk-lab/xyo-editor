@@ -1,0 +1,14 @@
+{
+  "name": "@hikkaku/xyo-cpp-wasm",
+  "private": true,
+  "license": "MIT",
+  "version": "0.0.0",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "build": "bash ./scripts/build.sh",
+    "test": "bun test ./test ./src"
+  }
+}

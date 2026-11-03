@@ -1,4 +1,4 @@
-# dependencies (bun install)
+# dependencies
 node_modules
 
 # output
@@ -34,3 +34,10 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 .DS_Store
 
 .tmp-*
+
+# local experiment scratch areas (LLVM/xyo build trees, browser profiles)
+.work/
+browser-profile-*/
+
+# pnpm sometimes materialises a store inside the workspace
+.pnpm-store/

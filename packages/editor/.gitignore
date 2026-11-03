@@ -24,3 +24,6 @@ dist-ssr
 *.sw?
 
 test-artifacts
+# Packed LLVM-in-Wasm artifacts for the experimental backend (regenerate with
+# `pnpm --filter xyo-editor run pack:llvm` after rebuilding llvm-wasm).
+public/llvm-artifacts
