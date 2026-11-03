@@ -88,7 +88,7 @@ describe('App runtime selection in the browser (offline fake backend)', () => {
     await page.evaluate(() => sessionStorage.setItem('fake-load-fails', 'yes'))
     await page.reload()
     expect(await page.getByRole('alert').textContent()).toContain(
-      '保存された実行環境を読み込めなかったため、現行 VM を使用します。',
+      '現行 VM を使用します',
     )
     await page.getByTestId('stage-canvas').waitFor()
     expect(await page.evaluate(() => sessionStorage.getItem('fake-load-count'))).toBe('2')

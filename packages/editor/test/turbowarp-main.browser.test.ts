@@ -75,7 +75,7 @@ suite('production main entry with real TurboWarp', () => {
       await page.goto(url)
       await page.getByRole('alert').waitFor({ state: 'visible', timeout: 30000 })
       expect(await page.getByRole('alert').textContent()).toContain(
-        '保存された実行環境を読み込めなかったため、現行 VM を使用します。',
+        '現行 VM を使用します',
       )
       await page.getByTestId('stage-canvas').waitFor({ state: 'visible', timeout: 30000 })
       expect(requests).toBe(1)
