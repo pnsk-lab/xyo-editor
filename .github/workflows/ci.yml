@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Check, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: false
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Type check
+        run: pnpm check
+
+      - name: VM tests
+        run: pnpm test
+
+      - name: LLVM helper tests
+        run: pnpm --filter @hikkaku/llvm-wasm test
+
+      - name: Editor unit tests
+        run: pnpm --filter xyo-editor test:unit
+
+      - name: Build
+        run: pnpm build
+        env:
+          # The experimental Wasm backends are built outside CI; keep the build
+          # deterministic by excluding them.
+          XYO_WASM: '0'
+
+      # Browser suites are opt-in (`pnpm --filter xyo-editor test:browser`) and
+      # need a Chrome/Chromium binary plus, for the experimental backends,
+      # locally built Wasm artifacts that are not part of the repository.
