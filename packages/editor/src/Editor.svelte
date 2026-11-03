@@ -87,7 +87,7 @@
   import type { PluginEditorState, PluginNotificationKind, PluginTabEntry } from './lib/plugins'
 
   export let context: EditorContext = createEditorContext()
-  export let runtimeOptions: { value: string; label: string }[] = []
+  export let runtimeOptions: { value: string; label: string; disabled?: boolean }[] = []
   export let selectedRuntime = ''
   export let onRuntimeChange: ((value: string) => void) | undefined = undefined
   export let onInitializationError: ((error: unknown) => void) | undefined = undefined

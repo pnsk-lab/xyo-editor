@@ -23,6 +23,10 @@ export type RuntimeBackendRegistration = {
   label: string
   /** Load code on demand; the returned factory creates a fresh pair per editor. */
   load: () => RuntimeBackendFactory | Promise<RuntimeBackendFactory>
+  /** Optional availability check, run before the backend is offered. */
+  probe?: () => Promise<void>
+  /** Explanation shown when `probe` rejects, e.g. missing build artifacts. */
+  unavailableReason?: string
 }
 export type RuntimeBackendInfo = Readonly<{ id: string; label: string }>
 export type RuntimeBackendStorage = Pick<Storage, 'getItem' | 'setItem'>
@@ -46,6 +50,7 @@ function browserStorage(): RuntimeBackendStorage | undefined {
 export class RuntimeBackendRegistry {
   private readonly entries = new Map<string, RuntimeBackendRegistration>()
   private readonly factories = new Map<string, Promise<RuntimeBackendFactory>>()
+  private readonly probes = new Map<string, Promise<boolean>>()
 
   constructor() {
     this.register({
@@ -61,16 +66,43 @@ export class RuntimeBackendRegistry {
     if (!registration.label.trim()) throw new Error('Runtime backend label must not be empty')
     // Copy metadata so later caller mutation cannot corrupt registry keys.
     this.entries.set(registration.id, { ...registration })
+    this.probes.delete(registration.id)
+    this.factories.delete(registration.id)
   }
 
   unregister(id: string): boolean {
     if (!this.entries.delete(id)) return false
     this.factories.delete(id)
+    this.probes.delete(id)
     return true
   }
 
   list(): RuntimeBackendInfo[] {
     return Array.from(this.entries.values(), ({ id, label }) => ({ id, label }))
+  }
+
+  /** Cached availability check; backends without a `probe` are always available. */
+  probe(id: string): Promise<boolean> {
+    const cached = this.probes.get(id)
+    if (cached) return cached
+    const entry = this.entries.get(id)
+    if (!entry) return Promise.resolve(false)
+    const pending = (async () => {
+      if (!entry.probe) return true
+      try {
+        await entry.probe()
+        return true
+      } catch {
+        return false
+      }
+    })()
+    this.probes.set(id, pending)
+    return pending
+  }
+
+  /** Why a backend is unavailable, when its registration declares a reason. */
+  unavailableReason(id: string): string | undefined {
+    return this.entries.get(id)?.unavailableReason
   }
 
   async create(id: string): Promise<RuntimeBackend> {

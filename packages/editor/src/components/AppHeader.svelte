@@ -34,7 +34,7 @@
     exportProject: () => void
     exportSb3: () => void
     toggleTurboMode: () => void
-    runtimeOptions?: { value: string; label: string }[]
+    runtimeOptions?: { value: string; label: string; disabled?: boolean }[]
     selectedRuntime?: string
     onRuntimeChange?: (value: string) => void
     greenFlag: () => void

@@ -55,6 +55,27 @@ describe('runtime backend registry', () => {
     ])
   })
 
+  it('caches availability probes and exposes the reason', async () => {
+    const registry = new RuntimeBackendRegistry()
+    let probes = 0
+    registry.register({
+      id: 'unbuilt',
+      label: 'Unbuilt',
+      probe: async () => {
+        probes++
+        throw new Error('artifacts missing')
+      },
+      unavailableReason: 'このビルドには同梱されていません',
+      load: () => () => ({ vm: new ScratchVM(), renderer: new ScratchCanvasRenderer() }),
+    })
+    expect(await registry.probe('unbuilt')).toBe(false)
+    expect(await registry.probe('unbuilt')).toBe(false)
+    expect(probes).toBe(1)
+    expect(registry.unavailableReason('unbuilt')).toBe('このビルドには同梱されていません')
+    expect(await registry.probe('scratch')).toBe(true)
+    expect(await registry.probe('unknown')).toBe(false)
+  })
+
   it('rejects invalid, duplicate and unknown IDs', async () => {
     const registry = new RuntimeBackendRegistry()
     const load = () => () => ({ vm: new ScratchVM(), renderer: new ScratchCanvasRenderer() })

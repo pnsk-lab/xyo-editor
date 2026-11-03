@@ -9,6 +9,12 @@ export const XYO_BACKEND_ID = 'xyo-cpp'
 
 const ARTIFACT_BASE = assetUrl('llvm-artifacts')
 
+/** Cheap same-origin probe used to hide the backend when the build has no artifacts. */
+async function probeArtifacts(): Promise<void> {
+  const response = await fetch(`${ARTIFACT_BASE}/xyo_browser_ir.wasm`, { method: 'HEAD' })
+  if (!response.ok) throw new Error(`LLVM artifacts are not served (HTTP ${response.status})`)
+}
+
 /** Experimental backend over the unified xyo-cpp Wasm runtime: the interpreter
  * covers xyo-cpp's full feature set and LLVM executes the admitted scripts
  * against that same Runtime. Artifacts come from public/llvm-artifacts (see
@@ -19,6 +25,8 @@ export function registerXyoBackend(registry: RuntimeBackendRegistry): void {
   registry.register({
     id: XYO_BACKEND_ID,
     label: 'xyo-cpp / LLVM（実験的）',
+    probe: probeArtifacts,
+    unavailableReason: 'このビルドには LLVM アーティファクトが同梱されていません',
     load: async () => {
       const artifactUrls = {
         worker: `${ARTIFACT_BASE}/llvm-runner.worker.js`,
@@ -31,10 +39,10 @@ export function registerXyoBackend(registry: RuntimeBackendRegistry): void {
         hostJs: `${ARTIFACT_BASE}/real_host.js`,
         hostWasm: `${ARTIFACT_BASE}/real_host.wasm`,
       }
-      const probe = await fetch(`${ARTIFACT_BASE}/xyo_browser_ir.wasm`, { method: 'HEAD' }).catch(() => null)
-      if (!probe || !probe.ok) {
-        throw new Error('LLVM アーティファクトが見つかりません。pnpm --filter xyo-editor run pack:llvm を実行してください。')
-      }
+      await probeArtifacts().catch((error: unknown) => {
+        if (import.meta.env.DEV) console.warn('xyo-cpp / LLVM を読み込めません。`pnpm --filter xyo-editor run pack:llvm` でアーティファクトを生成してください。', error)
+        throw new Error('このビルドには LLVM アーティファクトが同梱されていないため、xyo-cpp 実行環境を利用できません。')
+      })
       return () => createUnifiedBackend({
         module: `${ARTIFACT_BASE}/unified_runtime_esm.mjs`,
         wasm: `${ARTIFACT_BASE}/unified_runtime_esm.wasm`,

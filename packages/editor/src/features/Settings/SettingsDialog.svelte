@@ -4,7 +4,7 @@
   import type { PluginHost, PluginRecordInfo, PluginStatus } from '../../lib/plugins'
 
   let { turboMode, toggleTurboMode, close, runtimeOptions = [], selectedRuntime = '', onRuntimeChange, plugins } = $props<{
-    runtimeOptions?: { value: string; label: string }[]
+    runtimeOptions?: { value: string; label: string; disabled?: boolean }[]
     selectedRuntime?: string
     onRuntimeChange?: (value: string) => void
     turboMode: boolean
@@ -121,7 +121,7 @@
               <option value="" disabled>選択してください</option>
             {/if}
             {#each runtimeOptions as option (option.value)}
-              <option value={option.value}>{option.label}</option>
+              <option value={option.value} disabled={option.disabled}>{option.label}</option>
             {/each}
           </select>
         </div>
