@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { admitSb3Project, splitProjectForLlvm } from '@hikkaku/llvm-wasm'
 import { ScratchVM } from '@hikkaku/vm'
+import { hasMetadataCompiler } from './artifacts'
 
 // Seeded integration fuzz for general projects: random multi-hat, multi-target
 // projects go through split; every admitted synthesis must pass the whole-project
@@ -127,7 +128,7 @@ async function getCompiler() {
   return compiler
 }
 
-describe('split integration fuzz (seeded, real compiler + real VM, no execution)', () => {
+(hasMetadataCompiler() ? describe : describe.skip)('split integration fuzz (seeded, real compiler + real VM, no execution)', () => {
   test('admitted syntheses compile; remainders load and step', async () => {
     const c = await getCompiler()
     const read = (p: number): string => {

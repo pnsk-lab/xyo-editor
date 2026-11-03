@@ -4,7 +4,7 @@ import { join } from 'node:path'
 /** Repository root (packages/editor/test -> ../../..). */
 export const repoRoot = join(import.meta.dir, '..', '..', '..')
 
-/** Locally built xyo-cpp Wasm artifacts. Never committed: see xyO-cpp-wasm/README.md. */
+/** Locally built xyo-cpp Wasm artifacts. Never committed: see packages/xyo-cpp-wasm/README.md. */
 export const xyoWasmBuild = join(repoRoot, 'packages', 'xyo-cpp-wasm', '.work', 'build-wasm')
 export const xyoPenBuild = join(
   repoRoot,
@@ -15,6 +15,7 @@ export const xyoPenBuild = join(
 )
 export const llvmWasmWork = join(repoRoot, 'packages', 'llvm-wasm', '.work')
 export const llvmUnifiedBuild = join(llvmWasmWork, 'unified-build')
+export const llvmMetadataBuild = join(llvmWasmWork, 'metadata-build')
 export const llvmPublicArtifacts = join(repoRoot, 'packages', 'editor', 'public', 'llvm-artifacts')
 
 export const hasXyoWasm = (): boolean =>
@@ -31,6 +32,9 @@ export const hasXyoPen = (): boolean =>
 
 export const hasUnifiedRuntime = (): boolean =>
   existsSync(join(llvmUnifiedBuild, 'unified_runtime.wasm'))
+
+export const hasMetadataCompiler = (): boolean =>
+  existsSync(join(llvmMetadataBuild, 'xyo_browser_ir.cjs'))
 
 export const hasPackedLlvmArtifacts = (): boolean =>
   existsSync(join(llvmPublicArtifacts, 'xyo_browser_ir.wasm'))
