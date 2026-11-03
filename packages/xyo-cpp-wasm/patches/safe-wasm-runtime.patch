@@ -1,0 +1,242 @@
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index fb18060..2b9b36f 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -128,6 +128,15 @@ endif()
+ 
+ add_library(xyo STATIC ${XYO_CORE_SOURCES})
+ target_include_directories(xyo PUBLIC src)
++if(EMSCRIPTEN AND XYO_SAFE_WASM_DIR)
++  target_sources(xyo PRIVATE "${XYO_SAFE_WASM_DIR}/safe_lower.cpp"
++    "${XYO_SAFE_WASM_DIR}/safe_runtime.cpp")
++  target_include_directories(xyo PRIVATE "${XYO_SAFE_WASM_DIR}")
++  target_compile_definitions(xyo PUBLIC XYO_SAFE_WASM_RUNTIME=1)
++  if(XYO_SAFE_WASM_TESTING)
++    target_compile_definitions(xyo PRIVATE XYO_SAFE_JIT_TESTING=1)
++  endif()
++endif()
+ target_compile_options(xyo PRIVATE -fno-exceptions $<$<COMPILE_LANGUAGE:CXX>:-fno-rtti>)
+ if(EMSCRIPTEN)
+   # Emscripten: zlib は ports（-sUSE_ZLIB=1）から供給される（zlib 1.3.x）。
+diff --git a/src/blocks/core.cpp b/src/blocks/core.cpp
+--- a/src/blocks/core.cpp
++++ b/src/blocks/core.cpp
+@@ -1299,6 +1299,27 @@ void dummy() {
+ 
+ } // namespace
+ 
++#ifdef XYO_SAFE_WASM_RUNTIME
++// Return immutable identities, independent of Runtime's mutable registry.
++PrimFn safeCanonicalPrimitive(const std::string& op) {
++    if (op == "operator_add") return opAdd;
++    if (op == "operator_subtract") return opSub;
++    if (op == "operator_multiply") return opMul;
++    if (op == "operator_divide") return opDiv;
++    if (op == "operator_round") return opRound;
++    if (op == "operator_mathop") return opMathop;
++    if (op == "motion_movesteps") return motMoveSteps;
++    if (op == "motion_changexby") return motChangeX;
++    if (op == "motion_setx") return motSetX;
++    if (op == "motion_changeyby") return motChangeY;
++    if (op == "motion_sety") return motSetY;
++    if (op == "data_variable") return dtGetVar;
++    if (op == "data_setvariableto") return dtSetVar;
++    if (op == "data_changevariableby") return dtChangeVar;
++    return nullptr;
++}
++#endif
++
+ // ============================================================ 登録 ====
+ 
+ void registerCoreBlocks(Runtime& rt) {
+diff --git a/src/engine/runtime.cpp b/src/engine/runtime.cpp
+index 775d919..e29e188 100644
+--- a/src/engine/runtime.cpp
++++ b/src/engine/runtime.cpp
+@@ -11,6 +11,9 @@
+ #include "fiber.hpp"
+ #include "sequencer.hpp"
+ #include "../jit/jit.hpp"
++#ifdef XYO_SAFE_WASM_RUNTIME
++#include "safe_runtime.hpp"
++#endif
+ 
+ namespace xyo {
+ 
+@@ -89,6 +92,11 @@ void Runtime::stopThread(Thread* thread) {
+ }
+ 
+ Thread* Runtime::restartThread(Thread* thread, const Block* topHint) {
++#ifdef XYO_SAFE_WASM_RUNTIME
++    // The displaced Thread stays owned until Runtime destruction. Its pending
++    // module must not survive the replacement.
++    wasm::releaseSafeFlag(*thread);
++#endif
+     auto nt = std::make_unique<Thread>(thread->topBlock);
+     Thread* n = nt.get();
+     n->target = thread->target;
+@@ -216,6 +224,10 @@ std::vector<Thread*> Runtime::startHats(
+         } else {
+             execute(*sequencer, *t);
+             t->goToNextBlock();
++#ifdef XYO_SAFE_WASM_RUNTIME
++            if (requestedHatOpcode == "event_whenflagclicked")
++                wasm::prepareSafeFlag(*t);
++#endif
+         }
+     }
+     return newThreads;
+@@ -232,6 +239,9 @@ void Runtime::stopForTarget(Target* target, Thread* optException) {
+ }
+ 
+ void Runtime::stopAll() {
++#ifdef XYO_SAFE_WASM_RUNTIME
++    for (Thread* t : threads) wasm::releaseSafeFlag(*t);
++#endif
+     emitProjectStopAll();
+     // クローンを廃棄（dispose が executableTargets/sprite.clones から除去）
+     std::vector<Target*> keep;
+diff --git a/src/engine/sequencer.cpp b/src/engine/sequencer.cpp
+index 436b0f7..94d40a0 100644
+--- a/src/engine/sequencer.cpp
++++ b/src/engine/sequencer.cpp
+@@ -13,6 +13,9 @@
+ #include "fiber.hpp"
+ #include "pool.hpp"
+ #include "runtime.hpp"
++#ifdef XYO_SAFE_WASM_RUNTIME
++#include "safe_runtime.hpp"
++#endif
+ 
+ namespace xyo {
+ 
+@@ -181,6 +184,14 @@ std::vector<Thread*> Sequencer::stepThreads() {
+ }
+ 
+ void Sequencer::stepThread(Thread& thread) {
++#ifdef XYO_SAFE_WASM_RUNTIME
++    // A deferred chunk must never survive a yield or return to a later step.
++    struct SafeStepCleanup {
++        Thread& thread;
++        ~SafeStepCleanup() { wasm::releaseSafeFlag(thread); }
++    } cleanup{thread};
++    if (wasm::tryRunSafeFlag(thread) && thread.status == STATUS_DONE) return;
++#endif
+     if (thread.isCompiled) {
+         std::optional<ProfScope> ps;
+         if (prof().enabled) { ps.emplace(&prof().stepJitNs); ++prof().nJit; }
+@@ -228,5 +239,11 @@ void Sequencer::stepThreadBound(Thread& thread, size_t minDepth) {
+     while (thread.stack.size() > minDepth &&
+            !(currentBlockId = thread.peekStack()).empty()) {
++#ifdef XYO_SAFE_WASM_RUNTIME
++        if (minDepth == 0 && wasm::tryRunSafeFlag(thread)) {
++            if (thread.status == STATUS_DONE) return;
++            continue;
++        }
++#endif
+         const size_t initialStackSize = thread.stack.size();
+         bool isWarpMode = thread.peekStackFrame()->warpMode;
+         if (isWarpMode && !thread.hasWarpTimer) {
+@@ -236,7 +253,12 @@ void Sequencer::stepThreadBound(Thread& thread, size_t minDepth) {
+         if (thread.target == nullptr) {
+             retireThread(thread);
+         } else {
++#ifdef XYO_SAFE_WASM_LOOP_EXPERIMENT
++            if (!(minDepth == 0 && wasm::tryRunFirstLoopBody(thread)))
++                execute(*this, thread);
++#else
+             execute(*this, thread);
++#endif
+             if (countBlocks) ++blockCounter.n;
+         }
+         thread.blockGlowInFrame = currentBlockId;
+@@ -379,6 +402,9 @@ void Sequencer::jitStepThread(Thread& thread) {
+ }
+ 
+ void Sequencer::retireThread(Thread& thread) {
++#ifdef XYO_SAFE_WASM_RUNTIME
++    wasm::releaseSafeFlag(thread);
++#endif
+     // JS 版は stack のみクリアし stackFrames は残す（edge-activated hat が
+     // retire 直後に goToNextBlock → reuseStackForNextBlock で最終フレームを
+     // 再利用するため）。
+diff --git a/src/engine/thread.cpp b/src/engine/thread.cpp
+index c713ee2..d41a4cf 100644
+--- a/src/engine/thread.cpp
++++ b/src/engine/thread.cpp
+@@ -5,6 +5,9 @@
+ #include "../model/target.hpp"
+ #include "fiber.hpp"
+ #include "runtime.hpp"
++#ifdef XYO_SAFE_WASM_RUNTIME
++#include "safe_runtime.hpp"
++#endif
+ 
+ namespace xyo {
+ 
+@@ -13,6 +16,9 @@ Thread::Thread(std::string firstBlock) : topBlock(std::move(firstBlock)) {
+ }
+ 
+ Thread::~Thread() {
++#ifdef XYO_SAFE_WASM_RUNTIME
++    wasm::releaseSafeFlag(*this);
++#endif
+     FiberPool::release(fiber);
+     delete jitCtx;
+ }
+diff --git a/src/engine/thread.hpp b/src/engine/thread.hpp
+index 43e1b4c..ca79226 100644
+--- a/src/engine/thread.hpp
++++ b/src/engine/thread.hpp
+@@ -122,6 +122,22 @@ public:
+     ~Thread();
+ 
+     std::string topBlock;
++#ifdef XYO_SAFE_WASM_RUNTIME
++    // Per-thread, so greenFlag/restart discards old project state naturally.
++    bool safeWasmPending = false;
++    bool safeWasmLoop = false;
++    bool safeWasmLoopDidRun = false;
++    bool safeWasmLoopCacheOwned = false;
++    bool safeWasmPrefix = false;
++    bool safeWasmAfter = false;
++    std::string safeWasmStart;
++    std::string safeWasmNext;
++    std::vector<std::string> safeWasmStatements;
++    std::vector<std::string> safeWasmReporters;
++    int safeWasmHandle = -1;
++    std::vector<uint8_t> safeWasmCode;
++    std::vector<std::pair<std::string, std::u16string>> safeWasmBindings;
++#endif
+     std::vector<std::string> stack;              // "" = JS null
+     /// unique_ptr 保持で StackFrame*/ExecContext& の参照を常に安定させる
+     /// （pushStack/vector 再配置でダングルしない）。pop したフレームは
+diff --git a/src/wasm/wasm_compile.hpp b/src/wasm/wasm_compile.hpp
+--- a/src/wasm/wasm_compile.hpp
++++ b/src/wasm/wasm_compile.hpp
+@@ -41,6 +41,7 @@ enum class EK : uint8_t {
+     Mod,
+     Round,
+     Neg,
++    Abs, Floor, Ceil, Sqrt,
+ };
+ 
+ struct Expr {
+diff --git a/src/wasm/wasm_compile.cpp b/src/wasm/wasm_compile.cpp
+--- a/src/wasm/wasm_compile.cpp
++++ b/src/wasm/wasm_compile.cpp
+@@ -156,6 +156,14 @@ public:
+             c_.select();
+             return;
+         }
++        case EK::Abs: case EK::Floor: case EK::Ceil: case EK::Sqrt:
++            emitExpr(e.a);
++            nanToZero();
++            if (e.k == EK::Abs) c_.f64Abs();
++            else if (e.k == EK::Floor) c_.f64Floor();
++            else if (e.k == EK::Ceil) c_.f64Ceil();
++            else c_.f64Sqrt();
++            return;
+         case EK::Neg:
+             c_.f64Const(0.0);
+             emitExpr(e.a);

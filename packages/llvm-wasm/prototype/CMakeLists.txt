@@ -1,0 +1,37 @@
+cmake_minimum_required(VERSION 3.24)
+project(xyo_browser_ir_prototype LANGUAGES C CXX ASM)
+if(NOT EMSCRIPTEN)
+  message(FATAL_ERROR "prototype requires Emscripten; target ABI offsets come from compiler ABI")
+endif()
+set(CMAKE_CXX_STANDARD 20)
+set(XYO_SOURCE "" CACHE PATH "Disposable xyo-cpp checkout containing src/jit/browser_ir_api.cpp")
+if(NOT EXISTS "${XYO_SOURCE}/src/jit/browser_ir_api.cpp")
+  message(FATAL_ERROR "Set XYO_SOURCE to the disposable prototype checkout")
+endif()
+# Never reuse upstream's JIT=ON config: it pulls native ORC and host target.
+set(XYO_JIT OFF CACHE BOOL "" FORCE)
+set(XYO_BUILD_SHELL OFF CACHE BOOL "" FORCE)
+set(XYO_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(XYO_SDL2 OFF CACHE BOOL "" FORCE)
+set(XYO_WASM_JIT OFF CACHE BOOL "" FORCE)
+add_subdirectory("${XYO_SOURCE}" "${CMAKE_CURRENT_BINARY_DIR}/xyo")
+# Upstream globs src/wasm unconditionally. It is not part of this prototype.
+get_target_property(xyo_sources xyo SOURCES)
+list(FILTER xyo_sources EXCLUDE REGEX "(^|/)src/wasm/")
+set_property(TARGET xyo PROPERTY SOURCES "${xyo_sources}")
+find_package(LLVM REQUIRED CONFIG NO_DEFAULT_PATH PATHS "${LLVM_DIR}")
+if(NOT LLVM_PACKAGE_VERSION VERSION_EQUAL "19.1.7")
+  message(FATAL_ERROR "Only LLVM 19.1.7 compatibility was checked")
+endif()
+message(STATUS "Experimental LLVM: ${LLVM_PACKAGE_VERSION} ${LLVM_DIR}")
+target_include_directories(xyo SYSTEM PRIVATE ${LLVM_INCLUDE_DIRS})
+target_sources(xyo PRIVATE "${XYO_SOURCE}/src/jit/codegen.cpp"
+  "${XYO_SOURCE}/src/jit/parfor.cpp" "${XYO_SOURCE}/src/jit/browser_ir_api.cpp")
+llvm_map_components_to_libnames(llvm_libs core support analysis transformutils
+  passes target mc codegen asmprinter webassemblycodegen webassemblydesc webassemblyinfo)
+add_executable(xyo_browser_ir "${CMAKE_CURRENT_LIST_DIR}/empty.cpp")
+target_link_libraries(xyo_browser_ir PRIVATE xyo ${llvm_libs})
+target_link_options(xyo_browser_ir PRIVATE --no-entry -sALLOW_MEMORY_GROWTH=1
+  -sMODULARIZE=1 -sEXPORT_NAME=createXyoBrowserIr -sENVIRONMENT=web,worker,node
+  "-sEXPORTED_FUNCTIONS=['_malloc','_free','_xyo_browser_ir_compile','_xyo_browser_ir_ok','_xyo_browser_ir_text','_xyo_browser_ir_error','_xyo_browser_ir_destroy']")
+set_target_properties(xyo_browser_ir PROPERTIES SUFFIX ".js")

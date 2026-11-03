@@ -3,10 +3,13 @@
   "private": false,
   "version": "0.1.0",
   "type": "module",
+  "license": "MIT",
   "module": "./dist/editor.js",
   "types": "./dist/editor.d.ts",
   "files": [
-    "dist"
+    "dist",
+    "LICENSE",
+    "THIRD-PARTY.md"
   ],
   "exports": {
     ".": {
@@ -24,7 +27,9 @@
     "pack": "vp pack",
     "preview": "vite preview",
     "check": "svelte-check --tsconfig ./tsconfig.app.json && tsc -p tsconfig.node.json",
-    "test:browser": "pnpm build && bun test test/editor-conformance.test.ts",
+    "pack:llvm": "bun scripts/pack-llvm-artifacts.mjs",
+    "test:unit": "bun scripts/run-unit-tests.ts",
+    "test:browser": "pnpm build && bun test test/editor-conformance.test.ts test/plugin-editor.browser.test.ts",
     "test:visual": "pnpm build && bun test test/editor-conformance.test.ts"
   },
   "dependencies": {
@@ -32,6 +37,8 @@
     "paper": "^0.12.18"
   },
   "devDependencies": {
+    "@hikkaku/llvm-wasm": "workspace:*",
+    "@hikkaku/xyo-cpp-wasm": "workspace:*",
     "@hikkaku/vm": "workspace:*",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tailwindcss/vite": "^4.3.0",

@@ -1445,6 +1445,24 @@ export class ScratchVM {
     this.emit('WORKSPACE_UPDATE', this.snapshot())
   }
 
+  /** Commit a stopped, detached runtime project without resetting editor or execution state. */
+  commitRuntimeSnapshot(snapshot: RuntimeSnapshot): void {
+    if (snapshot.running || snapshot.threads.length > 0 || this.running || this.threads.length > 0) {
+      throw new Error('Cannot commit a runtime snapshot while execution is active')
+    }
+    const project = structuredClone(snapshot.project)
+    if (!project.targets.some((target) => target.id === this.selectedTargetId || target.name === this.selectedTargetId)) {
+      throw new Error('Cannot commit a runtime snapshot without the selected target')
+    }
+    this.project = project
+    this.clearDataLookupCache()
+    this.clearReporterCache()
+    const committed = this.snapshot()
+    this.emit('PROJECT_CHANGED', committed)
+    this.emit('TARGETS_UPDATE', committed)
+    this.emit('WORKSPACE_UPDATE', committed)
+  }
+
   getTarget(idOrName: string): ScratchTarget | undefined {
     return this.project.targets.find((target) => target.id === idOrName || target.name === idOrName)
   }
@@ -5323,6 +5341,42 @@ export class ScratchCanvasRenderer implements RendererFacade {
 
   penLine(line: PenLine): void {
     this.pendingPenLines.push({ ...line })
+  }
+
+  /** Drop prior-project ink and unflushed strokes without canvas allocation or drawing.
+   * The caller must schedule the next stage draw; failure of that later draw has
+   * the same display consequences as any other failed stage redraw. */
+  discardPenLayer(): void {
+    this.penCanvas = undefined
+    this.penContext = undefined
+    this.pendingPenLines = []
+    this.pendingPenClear = false
+    this.queuedDirectPenLines = undefined
+  }
+
+  /** Stage a complete pen batch on a private layer before replacing the visible
+   * layer. If copying or drawing throws, both the old layer and pending commands
+   * remain unchanged. This does not itself schedule or publish a stage frame. */
+  penBatchAtomic(operations: readonly ({ type: 'clear' } | { type: 'line'; line: PenLine })[]): void {
+    if (!operations.length) return
+    const canvas = createCanvasHost(SCRATCH_STAGE_WIDTH, SCRATCH_STAGE_HEIGHT)
+    const context = canvas.getContext('2d')
+    if (!context) throw new Error('Cannot create transactional pen layer')
+    if (!this.pendingPenClear && this.penCanvas) context.drawImage(this.penCanvas, 0, 0, canvas.width, canvas.height)
+    if (this.pendingPenLines.length) drawPenLineRuns(context, canvas.width, canvas.height, this.pendingPenLines)
+    let lines: PenLine[] = []
+    const flush = () => { if (lines.length) { drawPenLineRuns(context, canvas.width, canvas.height, lines); lines = [] } }
+    for (const operation of operations) {
+      if (operation.type === 'clear') { flush(); context.clearRect(0, 0, canvas.width, canvas.height) }
+      else if (operation.type === 'line') lines.push({ ...operation.line })
+      else throw new Error('Invalid transactional pen operation')
+    }
+    flush()
+    // No stage drawing or user callback occurs between these assignments.
+    this.penCanvas = canvas
+    this.penContext = context
+    this.pendingPenLines = []
+    this.pendingPenClear = false
   }
 
   penStamp(target: ScratchTarget): void {

@@ -1,0 +1,26 @@
+--- a/src/engine/runtime.cpp
++++ b/src/engine/runtime.cpp
+@@ -240,6 +240,11 @@ void Runtime::stopAll() {
+         if (!t->isOriginal) {
+             if (onTargetRemoved) onTargetRemoved(t);
+             t->dispose();
++            // A timed say/think may outlive its clone. Keep the wait itself
++            // (and its resolution semantics), but never dereference a dead target.
++            for (auto& wait : waitQueue) {
++                if (wait.bubbleTarget == t) wait.bubbleTarget = nullptr;
++            }
+             delete t;
+         } else {
+             keep.push_back(t);
+@@ -403,6 +408,11 @@ void Runtime::disposeTarget(Target* target) {
+         if (!editingTarget && !targets.empty()) editingTarget = targets[0];
+     }
+     if (onTargetRemoved) onTargetRemoved(target);
++    // Only discard the side effect tied to this target. Other waits, including
++    // their deadlines and thread resolutions, must remain untouched.
++    for (auto& wait : waitQueue) {
++        if (wait.bubbleTarget == target) wait.bubbleTarget = nullptr;
++    }
+     delete target;
+ }
+ 

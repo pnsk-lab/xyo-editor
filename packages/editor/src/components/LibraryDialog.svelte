@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { assetUrl } from '../lib/asset-url'
   import type { LibraryPanel, LibraryItem } from '../lib/editor-types'
 
   let {
@@ -116,7 +117,7 @@
                   {item.icon}
                 </div>
               {:else if 'costumes' in item}
-                <img class="max-h-full max-w-full object-contain" src={`/assets-scratch/images/${item.costumes[0]?.md5ext}`} alt="" />
+                <img class="max-h-full max-w-full object-contain" src={assetUrl(`assets-scratch/images/${item.costumes[0]?.md5ext}`)} alt="" />
               {:else if 'sampleCount' in item}
                 <div class="flex h-16 w-24 items-center gap-1">
                   {#each [0.25, 0.65, 0.4, 0.9, 0.55, 0.75, 0.32, 0.6] as peak}
@@ -124,7 +125,7 @@
                   {/each}
                 </div>
               {:else if 'md5ext' in item}
-                <img class="max-h-full max-w-full object-contain" src={`/assets-scratch/images/${item.md5ext}`} alt="" />
+                <img class="max-h-full max-w-full object-contain" src={assetUrl(`assets-scratch/images/${item.md5ext}`)} alt="" />
               {:else if 'shape' in item}
                 <img class="max-h-full max-w-full object-contain" src={`data:image/svg+xml;base64,${bytesToLocalBase64(new TextEncoder().encode(librarySvg(item.shape, item.color)))}`} alt="" />
               {/if}

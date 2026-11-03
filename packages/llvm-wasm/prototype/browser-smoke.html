@@ -1,0 +1,8 @@
+<!doctype html><meta charset="utf-8"><title>XYO LLVM Worker smoke</title>
+<pre id="result">RUNNING</pre>
+<script>
+const worker = new Worker('browser-worker.js');
+worker.onmessage = e => { document.querySelector('#result').textContent = JSON.stringify(e.data); worker.terminate(); };
+worker.onerror = e => { document.querySelector('#result').textContent = JSON.stringify({ok:false,error:e.message}); worker.terminate(); };
+worker.postMessage({});
+</script>

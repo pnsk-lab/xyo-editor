@@ -2,6 +2,23 @@ import { defineConfig } from 'vite-plus'
 import { svelte } from '@sveltejs/vite-plugin-svelte'
 import tailwindcss from '@tailwindcss/vite'
 import { compile } from 'svelte/compiler'
+import { existsSync } from 'node:fs'
+
+function xyoWorkerPlugin() {
+  const id = '\0virtual:xyo-worker'
+  const available = process.env.XYO_WASM !== '0' && ['xyo-browser-esm.mjs', 'xyo-browser-esm.wasm'].every(name =>
+    existsSync(new URL(`../xyo-cpp-wasm/.work/build-wasm/${name}`, import.meta.url)))
+  return {
+    name: 'hikkaku:xyo-worker',
+    resolveId(source: string) { if (source === 'virtual:xyo-worker') return id },
+    load(source: string) {
+      if (source !== id) return
+      return available
+        ? `export { default } from '/src/lib/xyo-worker-entry.ts?worker'`
+        : `export default class { constructor() { throw new Error('xyo-cpp WASM artifacts are missing; build xyo-cpp-wasm and restart Vite') } }`
+    },
+  }
+}
 
 function sveltePackPlugin() {
   return {
@@ -27,7 +44,7 @@ function sveltePackPlugin() {
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [tailwindcss(), svelte()],
+  plugins: [xyoWorkerPlugin(), tailwindcss(), svelte()],
   pack: {
     entry: ['src/editor.ts'],
     dts: {

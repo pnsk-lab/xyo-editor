@@ -1,0 +1,103 @@
+--- a/src/engine/thread.hpp
++++ b/src/engine/thread.hpp
+@@ -4,6 +4,7 @@
+ 
+ #include <cstdint>
+ #include <deque>
++#include <exception>
+ #include <memory>
+ #include <string>
+ #include <unordered_map>
+@@ -120,6 +121,14 @@
+ public:
+     explicit Thread(std::string firstBlock);
+     ~Thread();
++
++    // Every transition into a promise wait receives a new identity.
++    uint64_t waitGeneration = 0;
++    void beginPromiseWait() {
++        if (waitGeneration == UINT64_MAX) std::terminate();
++        ++waitGeneration;
++        status = STATUS_PROMISE_WAIT;
++    }
+ 
+     std::string topBlock;
+     std::vector<std::string> stack;              // "" = JS null
+--- a/src/engine/block_utility.cpp
++++ b/src/engine/block_utility.cpp
+@@ -31,7 +31,7 @@
+     w.thread = thread;
+     w.nextTick = true;
+     runtime()->waitQueue.push_back(w);
+-    thread->status = STATUS_PROMISE_WAIT;
++    thread->beginPromiseWait();
+ }
+ 
+ void BlockUtility::stopAll() {
+--- a/src/blocks/core.cpp
++++ b/src/blocks/core.cpp
+@@ -667,7 +667,7 @@
+     w.bubbleType = type;
+     w.bubbleUsageId = usageId;
+     rt->waitQueue.push_back(w);
+-    u.thread->status = STATUS_PROMISE_WAIT;
++    u.thread->beginPromiseWait();
+     return Value::undefined();
+ }
+ Value looksSayForSecs(const ArgValues& a, BlockUtility& u) {
+@@ -1065,7 +1065,7 @@
+             rt->onQuestion(&e.question);
+         }
+     }
+-    u.thread->status = STATUS_PROMISE_WAIT;
++    u.thread->beginPromiseWait();
+     return Value::undefined();
+ }
+ Value snsOf(const ArgValues& a, BlockUtility& u) {
+@@ -1127,7 +1127,7 @@
+     if (!t->sprite || !t->sprite->soundBank) return Value::undefined();
+     int idx = getSoundIndex(v(a, "SOUND_MENU"), t);
+     if (idx >= 0) {
+-        u.thread->status = STATUS_PROMISE_WAIT;
++        u.thread->beginPromiseWait();
+         t->sprite->soundBank->playSoundAndWait(
+             t, t->sprite->sounds[idx].soundId, u.thread);
+     }
+--- a/src/jit/rt_blocks.cpp
++++ b/src/jit/rt_blocks.cpp
+@@ -116,7 +116,7 @@
+     w.bubbleType = type;
+     w.bubbleUsageId = t->bubbleUsageId;
+     rt->waitQueue.push_back(w);
+-    c->thread->status = STATUS_PROMISE_WAIT;
++    c->thread->beginPromiseWait();
+     xyo_yield(c);
+ }
+ 
+@@ -136,7 +136,7 @@
+     w.thread = c->thread;
+     w.nextTick = true;
+     c->runtime->waitQueue.push_back(w);
+-    c->thread->status = STATUS_PROMISE_WAIT;
++    c->thread->beginPromiseWait();
+     xyo_yield(c);
+ }
+ 
+@@ -680,7 +680,7 @@
+             rt->onQuestion(&e.question);
+         }
+     }
+-    c->thread->status = STATUS_PROMISE_WAIT;
++    c->thread->beginPromiseWait();
+     xyo_yield(c);
+ }
+ uint64_t xyo_sns_of(JitCtx* c, uint64_t obj, uint64_t prop) {
+@@ -783,7 +783,7 @@
+     if (!t->sprite || !t->sprite->soundBank) return;
+     int idx = getSoundIndex(toV(menu), t);
+     if (idx >= 0) {
+-        c->thread->status = STATUS_PROMISE_WAIT;
++        c->thread->beginPromiseWait();
+         t->sprite->soundBank->playSoundAndWait(
+             t, t->sprite->sounds[idx].soundId, c->thread);
+         xyo_yield(c);

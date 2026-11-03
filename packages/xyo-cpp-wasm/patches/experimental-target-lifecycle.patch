@@ -1,0 +1,47 @@
+--- a/src/engine/runtime.hpp
++++ b/src/engine/runtime.hpp
+@@ -264,6 +264,11 @@
+     std::function<void()> onTargetsUpdate;
+     std::function<void(Target*)> onTargetCreated;
+     std::function<void(Target*)> onTargetRemoved;
++    // Experimental observer: 1 = initialized clone created, 2 = being deleted.
++    // Borrowed Target; callback must not reenter runtime APIs or mutate Runtime.
++    // Owner must outlive Runtime, or clear this pointer before destruction.
++    void (*targetLifecycleObserver)(void*, int, Target*) = nullptr;
++    void* targetLifecycleContext = nullptr;
+     /// SAY — 'say'/'think' バブル表示（target, type, text）
+     std::function<void(Target*, const char* type, const std::u16string&)> onSay;
+     /// QUESTION — ask and wait の入力要求（nullopt でクリア）
+--- a/src/model/target.hpp
++++ b/src/model/target.hpp
+@@ -59,6 +59,7 @@
+ class Target {
+ public:
+     explicit Target(Runtime* rt, Sprite* sprite = nullptr);
++    ~Target();
+ 
+     Runtime* runtime;
+     std::string id;
+--- a/src/model/target.cpp
++++ b/src/model/target.cpp
+@@ -37,6 +37,11 @@
+     for (const char* e : {"color", "fisheye", "whirl", "pixelate",
+                           "mosaic", "brightness", "ghost"})
+         effects[e] = 0;
++}
++
++Target::~Target() {
++    if (runtime && runtime->targetLifecycleObserver)
++        runtime->targetLifecycleObserver(runtime->targetLifecycleContext, 2, this);
+ }
+ 
+ // ---------------------------------------------------------------- 変数 --
+@@ -437,6 +442,8 @@
+         c->penState = std::make_unique<PenState>(*penState);
+         c->onTargetMoved = onTargetMoved;
+     }
++    if (runtime->targetLifecycleObserver)
++        runtime->targetLifecycleObserver(runtime->targetLifecycleContext, 1, c);
+     if (runtime->onTargetCreated) runtime->onTargetCreated(c);
+     c->updateAllDrawableProperties();
+     // JS: initDrawable — クローンはここで start_as_clone ハットを起動

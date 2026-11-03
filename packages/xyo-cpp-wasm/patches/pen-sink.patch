@@ -1,0 +1,72 @@
+--- a/src/engine/runtime.hpp
++++ b/src/engine/runtime.hpp
+@@ -40,6 +40,16 @@
+ struct FlowingFlags {
+     bool conditional = false;
+     bool loop = false;
++};
++
++// Optional nonblocking pen command sink; callbacks copy values before returning.
++// The owner keeps this alive until detaching it from Runtime.
++struct PenSink {
++    virtual ~PenSink() = default;
++    virtual void point(const float rgba[4], double diameter, double x, double y) = 0;
++    virtual void line(const float rgba[4], double diameter, double x0, double y0, double x1, double y1) = 0;
++    virtual void clear() = 0;
++    virtual void stampUnsupported() = 0;
+ };
+ 
+ /// レンダラ抽象（NullRenderer / 将来の実レンダラ）
+@@ -203,6 +213,7 @@
+ 
+     // --- 外部インターフェース ---
+     RendererAPI* renderer = nullptr;
++    PenSink* penSink = nullptr;
+     /// Scratch.pen 共有レイヤ skin id（createPenSkin の遅延結果）
+     int penSkinId = -1;
+     AudioAPI* audioEngine = nullptr;
+--- a/src/blocks/pen.cpp
++++ b/src/blocks/pen.cpp
+@@ -142,10 +142,11 @@
+     if (force || !t->penState || !t->penState->penDown) return;
+     Runtime* rt = t->runtime;
+     int skin = penSkin(rt);
+-    if (skin >= 0) {
++    if (skin >= 0 || rt->penSink) {
+         PenState& p = *t->penState;
+         syncPenColor(p);
+-        rt->renderer->penLine(skin, p.rgba, p.penSize, oldX, oldY, t->x, t->y);
++        if (skin >= 0) rt->renderer->penLine(skin, p.rgba, p.penSize, oldX, oldY, t->x, t->y);
++        if (rt->penSink) rt->penSink->line(p.rgba, p.penSize, oldX, oldY, t->x, t->y);
+         rt->redrawRequested = true;
+     }
+ }
+@@ -207,9 +208,10 @@
+         t->onTargetMoved = penOnTargetMoved;
+     }
+     int skin = penSkin(rt);
+-    if (skin >= 0) {
++    if (skin >= 0 || rt->penSink) {
+         syncPenColor(p);
+-        rt->renderer->penPoint(skin, p.rgba, p.penSize, t->x, t->y);
++        if (skin >= 0) rt->renderer->penPoint(skin, p.rgba, p.penSize, t->x, t->y);
++        if (rt->penSink) rt->penSink->point(p.rgba, p.penSize, t->x, t->y);
+         rt->redrawRequested = true;
+     }
+ }
+@@ -219,6 +221,7 @@
+     t->onTargetMoved = nullptr;
+ }
+ void penClearCore(Runtime* rt) {
++    if (rt->penSink) rt->penSink->clear();
+     int skin = penSkin(rt);
+     if (skin >= 0) {
+         rt->renderer->penClear(skin);
+@@ -226,6 +229,7 @@
+     }
+ }
+ void penStampCore(Target* t, Runtime* rt) {
++    if (rt->penSink) rt->penSink->stampUnsupported();
+     int skin = penSkin(rt);
+     if (skin >= 0) {
+         rt->renderer->penStamp(skin, t->drawableID);

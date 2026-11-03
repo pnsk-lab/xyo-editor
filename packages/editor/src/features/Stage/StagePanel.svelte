@@ -10,7 +10,11 @@
     stageFullscreen,
     snapshot,
     fps,
+    llvmStats = undefined,
     visibleMonitors,
+    question = null,
+    questionId = '',
+    answerQuestion,
     toggleStageFullscreen,
     pickSprite,
     updateMouse,
@@ -31,7 +35,11 @@
     stageFullscreen: boolean
     snapshot: RuntimeSnapshot
     fps: number
+    llvmStats?: { ms: number; passed: number; total: number }
     visibleMonitors: Monitor[]
+    question?: string | null
+    questionId?: string
+    answerQuestion: (answer: string) => void
     toggleStageFullscreen: () => void
     pickSprite: (event: MouseEvent) => void
     updateMouse: (event: MouseEvent | PointerEvent) => void
@@ -50,6 +58,17 @@
   }>()
 
   let stageFrame: HTMLDivElement | undefined
+  let answer = $state('')
+  $effect(() => { question; questionId; answer = '' })
+  function focusAnswer(node: HTMLInputElement) {
+    node.focus()
+  }
+  function submitAnswer(event: SubmitEvent) {
+    event.preventDefault()
+    const value = answer
+    answer = ''
+    answerQuestion(value)
+  }
   let monitorContextMenu = $state<{ monitorId: string; x: number; y: number } | undefined>()
 
   function monitorLabel(monitor: Monitor) {
@@ -151,6 +170,13 @@
       <span class="min-w-12 text-left font-mono text-[11px] font-semibold tabular-nums text-[#575e75]" aria-label="FPS" title="FPS" data-testid="stage-fps">
         {fps} fps
       </span>
+      {#if llvmStats}
+        <span
+          class="font-mono text-[10px] text-[#8a93a6]"
+          title="LLVM compile time and how many units compiled"
+          data-testid="stage-llvm-stats"
+        >{#if llvmStats.total === 0}compiled in {llvmStats.ms}ms (nothing to compile){:else}compiled in {llvmStats.ms}ms (passed {llvmStats.passed}/{llvmStats.total}){/if}</span>
+      {/if}
     </div>
     <div class="flex overflow-hidden rounded border border-[#c8c8d0] bg-white">
       <button class="flex h-9 w-10 items-center justify-center text-[#575e75] hover:bg-[#f2f2f2]" aria-label={stageFullscreen ? 'Exit fullscreen' : 'Fullscreen'} title={stageFullscreen ? 'Exit fullscreen' : 'Fullscreen'} onclick={toggleStageFullscreen}>
@@ -227,6 +253,17 @@
         {/if}
       </div>
     {/each}
+    {#if question !== null}
+      {#key questionId}
+      <form class="absolute bottom-2 left-2 right-2 z-20 rounded-lg border border-[#b8c6d8] bg-white p-2 shadow-lg" onsubmit={submitAnswer} aria-label="Question">
+        <div class="mb-1 whitespace-pre-wrap break-words text-sm text-[#575e75]">{question}</div>
+        <div class="flex gap-2">
+          <input class="min-w-0 flex-1 rounded border border-[#b8c6d8] px-2 py-1 text-sm" aria-label="Answer" data-testid="stage-answer-input" use:focusAnswer bind:value={answer} />
+          <button class="rounded bg-[#4c97ff] px-3 py-1 text-sm font-semibold text-white" type="submit">Submit</button>
+        </div>
+      </form>
+      {/key}
+    {/if}
     {#if monitorContextMenu && contextMonitor()}
       {@const monitor = contextMonitor()!}
       <div

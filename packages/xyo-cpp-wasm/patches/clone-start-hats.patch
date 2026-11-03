@@ -1,0 +1,14 @@
+diff --git a/src/blocks/core.cpp b/src/blocks/core.cpp
+index 9a8a9c3..d34069b 100644
+--- a/src/blocks/core.cpp
++++ b/src/blocks/core.cpp
+@@ -408,6 +408,9 @@ Value ctlCreateClone(const ArgValues& a, BlockUtility& u) {
+     if (c) {
+         u.runtime()->addTarget(c);
+         c->goBehindOther(cloneTarget);
++        // Scratch starts the clone's `when I start as a clone` hats when the
++        // clone is created; without this the clone exists but never runs.
++        u.runtime()->startHats("control_start_as_clone", nullptr, c);
+     }
+     return Value::undefined();
+ }

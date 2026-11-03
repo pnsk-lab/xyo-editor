@@ -17,6 +17,7 @@ type RuntimeWorkerCommand =
   | { type: 'toggleScript'; topBlockId: string; targetId: string; syncId?: number }
   | { type: 'reportBlockValue'; blockId: string; targetId: string; syncId?: number }
   | { type: 'setTurboMode'; enabled: boolean; syncId?: number }
+  | { type: 'answerPrompt'; value: string; syncId?: number }
   | { type: 'postMouse'; data: unknown; syncId?: number }
   | { type: 'postKeyboard'; data: unknown; syncId?: number }
   | { type: 'startDrag'; targetId: string; syncId?: number }
@@ -29,6 +30,7 @@ type RuntimeWorkerEvent =
   | { type: 'soundPlayed'; targetName: string; sound: ScratchSound; snapshot: RuntimeSnapshot; syncId?: number }
   | { type: 'soundsStopped'; snapshot: RuntimeSnapshot; syncId?: number }
   | { type: 'visualReport'; id: string; value: string; snapshot: RuntimeSnapshot; syncId?: number }
+  | { type: 'question'; payload: { question?: string | null; answer?: string }; syncId: number; resetId: number }
   | { type: 'fps'; fps: number }
   | { type: 'error'; message: string }
 
@@ -43,6 +45,7 @@ const renderer = new ScratchCanvasRenderer()
 let frameTimer: ReturnType<typeof setTimeout> | number | undefined
 let applyingHostSnapshot = false
 let latestHostSyncId = 0
+let latestResetSyncId = 0
 let frameCount = 0
 let fpsWindowStart = performance.now()
 let lastRuntimeSnapshotPost = 0
@@ -119,6 +122,10 @@ for (const event of ['PROJECT_LOADED', 'PROJECT_CHANGED', 'TARGETS_UPDATE', 'WOR
   })
 }
 
+vm.on<{ question?: string | null; answer?: string }>('QUESTION', (payload) => {
+  if (!applyingHostSnapshot) self.postMessage({ type: 'question', payload, syncId: latestHostSyncId, resetId: latestResetSyncId } satisfies RuntimeWorkerEvent)
+})
+
 vm.on<{ targetName: string; sound: ScratchSound }>('SOUND_PLAYED', ({ targetName, sound }) => {
   const message: RuntimeWorkerEvent = { type: 'soundPlayed', targetName, sound, snapshot: vm.lightweightSnapshot(), syncId: latestHostSyncId }
   self.postMessage(message)
@@ -140,6 +147,10 @@ self.onmessage = async (event: MessageEvent<RuntimeWorkerCommand>) => {
   const command = event.data
   try {
     if (command.type === 'sync' && command.syncId < latestHostSyncId) return
+    if ((command.type === 'greenFlag' || command.type === 'stopAll' || command.type === 'sync') && command.syncId !== undefined) {
+      if (command.syncId < latestResetSyncId) return
+      latestResetSyncId = command.syncId
+    }
     if ('syncId' in command && typeof command.syncId === 'number') latestHostSyncId = Math.max(latestHostSyncId, command.syncId)
     switch (command.type) {
       case 'init':
@@ -201,6 +212,9 @@ self.onmessage = async (event: MessageEvent<RuntimeWorkerCommand>) => {
       case 'setTurboMode':
         vm.setTurboMode(command.enabled)
         postRuntimeSnapshot('TURBO_MODE_UPDATE')
+        break
+      case 'answerPrompt':
+        vm.answerPrompt(command.value)
         break
       case 'postMouse':
         vm.postMouse(command.data)

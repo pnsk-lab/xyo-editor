@@ -19,6 +19,7 @@
   import LibraryDialog from './components/LibraryDialog.svelte'
   import AssetSidebar from './features/AssetLibrary/AssetSidebar.svelte'
   import { loadCostumeThumbnail, thumbnailUrls, type CostumeThumbnailEntry } from './features/AssetLibrary/costume-thumbnails'
+  import { assetUrl } from './lib/asset-url'
   import BitmapEditor from './features/CostumeEditor/BitmapEditor.svelte'
   import CodeEditor from './features/CodeEditor/CodeEditor.svelte'
   import SoundEditor from './features/SoundEditor/SoundEditor.svelte'
@@ -72,6 +73,7 @@
   import {
     ScratchCanvasRenderer,
     ScratchStorage,
+    ScratchVM,
     blockPalette,
     costumeUpload as vmCostumeUpload,
     soundUpload as vmSoundUpload,
@@ -82,11 +84,19 @@
     type ScratchTarget,
   } from '@hikkaku/vm'
   import { createEditorContext, type EditorContext, type EditorContextTab, type EditorHeaderConfig } from './lib/editor-context'
+  import type { PluginEditorState, PluginNotificationKind, PluginTabEntry } from './lib/plugins'
 
   export let context: EditorContext = createEditorContext()
+  export let runtimeOptions: { value: string; label: string }[] = []
+  export let selectedRuntime = ''
+  export let onRuntimeChange: ((value: string) => void) | undefined = undefined
+  export let onInitializationError: ((error: unknown) => void) | undefined = undefined
 
   const vm = context.vm
-  const renderer = new ScratchCanvasRenderer()
+  const plugins = context.plugins
+  // Legacy contexts can supply only a VM. Never mix it with a different pair.
+  const backend = context.backend?.vm === vm ? context.backend : undefined
+  const renderer = backend?.renderer ?? new ScratchCanvasRenderer()
   let runtimeInWorker = false
   let applyingWorkerSnapshot = false
   function applyWorkerRuntimeSnapshot(next: RuntimeSnapshot, event = '') {
@@ -124,13 +134,20 @@
     (nextFps) => {
       fps = nextFps
     },
+    backend ? backend.worker === 'scratch' : !context.backend && vm.constructor === ScratchVM,
+    (payload) => updateStageQuestion(payload),
   )
   const uploadStorage = new ScratchStorage()
   Blockly.setLocale(BlocklyEn as unknown as Record<string, string>)
   let snapshot: RuntimeSnapshot = vm.snapshot()
+  let stageQuestion: string | null = null
+  let stageQuestionId = ''
+  let questionSerial = 0
   let projectTitle = 'Untitled Scratch Project'
   let status = 'Ready'
   let fps = 0
+  let llvmStats: { ms: number; passed: number; total: number } | undefined = undefined
+  let llvmStatsTimer: ReturnType<typeof setInterval> | undefined
   let fpsFrameCount = 0
   let fpsWindowStart = typeof performance !== 'undefined' ? performance.now() : 0
   let runtimeUiRefreshAt = 0
@@ -139,6 +156,40 @@
   let selectedExternalTabId = context.tabs?.[0]?.id ?? ''
   let stageFullscreen = false
   let stagePaneWidth = 540
+  let pluginState: PluginEditorState = {
+    projectTitle,
+    theme: colorScheme,
+    status,
+    fps,
+    running: snapshot.running,
+    selectedTargetId: snapshot.selectedTargetId,
+    stage: { width: 480, height: 360, fullscreen: stageFullscreen },
+    snapshot,
+  }
+  let pluginToasts: Array<{ id: number; message: string; kind: PluginNotificationKind }> = []
+  let pluginToastSerial = 0
+  const pluginToastTimers = new Set<ReturnType<typeof setTimeout>>()
+  $: pluginState = {
+    projectTitle,
+    theme: colorScheme,
+    status,
+    fps,
+    running: snapshot.running,
+    selectedTargetId: snapshot.selectedTargetId,
+    stage: { width: 480, height: 360, fullscreen: stageFullscreen },
+    snapshot,
+  }
+  $: if (plugins) plugins.publishState(pluginState)
+
+  function showPluginNotification(message: string, kind: PluginNotificationKind = 'info') {
+    const id = ++pluginToastSerial
+    pluginToasts = [...pluginToasts, { id, message, kind }]
+    const timer = setTimeout(() => {
+      pluginToasts = pluginToasts.filter((toast) => toast.id !== id)
+      pluginToastTimers.delete(timer)
+    }, 5000)
+    pluginToastTimers.add(timer)
+  }
   let paintColor = '#ffab19'
   let secondaryPaintColor = '#ffffff'
   let paintGradient: 'solid' | 'horizontal' | 'vertical' | 'radial' = 'solid'
@@ -333,6 +384,7 @@
   let stageCanvas: HTMLCanvasElement
   let attachedStageCanvas: HTMLCanvasElement | undefined
   let stageMounted = false
+  let editorDestroyed = false
   let workspace: Blockly.WorkspaceSvg | undefined
   let tickTimer: ReturnType<typeof setInterval> | undefined
   let resizeObserver: ResizeObserver | undefined
@@ -373,6 +425,7 @@
     document.documentElement.dataset.theme = scheme
     document.documentElement.style.colorScheme = scheme
     workspace?.setTheme(scheme === 'dark' ? darkBlocklyTheme : scratchBlocklyTheme)
+    plugins?.publishTheme(scheme)
   }
 
   function toggleColorScheme() {
@@ -431,26 +484,91 @@
     { id: 'costumes', label: 'コスチューム', icon: Paintbrush },
     { id: 'sounds', label: '音', icon: Volume2 },
   ]
+  type ExternalTabEntry = {
+    id: string
+    label: string
+    icon: Element
+    content?: Element
+    plugin?: PluginTabEntry
+    order: number
+    index: number
+  }
+
+  const PLUGIN_TAB_DEFAULT_ORDER = 100
+
   let contextTabs: EditorContextTab[] = [...(context.tabs ?? [])]
+  let pluginTabEntries: PluginTabEntry[] = []
   let header: EditorHeaderConfig = context.header ?? {}
-  let orderedContextTabs: Array<{ tab: EditorContextTab; index: number; order: number; id: string }> = []
-  let activeContextTab: { tab: EditorContextTab; index: number; order: number; id: string } | undefined
+  let orderedContextTabs: ExternalTabEntry[] = []
+  let activeContextTab: ExternalTabEntry | undefined
   let unsubscribeContextTabs: (() => void) | undefined
   let unsubscribeContextHeader: (() => void) | undefined
-  $: orderedContextTabs = contextTabs
-    .map((tab, index) => ({ tab, index, order: tab.order ?? 0, id: externalTabId(tab, index) }))
-    .sort((a, b) => a.order - b.order || a.index - b.index)
+  let unsubscribePluginTabs: (() => void) | undefined
+  const pluginTabIcons = new WeakMap<PluginTabEntry, Element>()
+
+  $: orderedContextTabs = [
+    ...contextTabs.map((tab, index) => ({
+      id: externalTabId(tab, index),
+      label: tab.label,
+      icon: tab.icon,
+      content: tab.content,
+      order: tab.order ?? 0,
+      index,
+    })),
+    ...pluginTabEntries.map((entry, index) => ({
+      id: `plugin:${entry.id}`,
+      label: entry.tab.label,
+      icon: pluginTabIcon(entry),
+      plugin: entry,
+      order: typeof entry.tab.order === 'number' ? entry.tab.order : PLUGIN_TAB_DEFAULT_ORDER,
+      index: contextTabs.length + index,
+    })),
+  ].sort((a, b) => a.order - b.order || a.index - b.index)
   $: activeContextTab = orderedContextTabs.find((item) => item.id === selectedExternalTabId)
+  // Deactivating a plugin removes its tab; never leave the editor on a dead tab.
+  $: if (selectedExternalTabId && !orderedContextTabs.some((entry) => entry.id === selectedExternalTabId)) {
+    selectedExternalTabId = ''
+    selectedTab = 'code'
+  }
 
   function externalTabId(tab: EditorContextTab, index: number) {
     return tab.id || `external-${index}`
   }
 
-  function mountElement(node: HTMLElement, element: Element) {
+  function pluginTabIcon(entry: PluginTabEntry): Element {
+    const cached = pluginTabIcons.get(entry)
+    if (cached) return cached
+    let declared: Element | undefined
+    try {
+      declared = typeof entry.tab.icon === 'function' ? entry.tab.icon() : entry.tab.icon
+    } catch (error) {
+      console.error(`[plugins] failed to create the icon for "${entry.id}"`, error)
+    }
+    const icon = declared instanceof Element ? declared : createDefaultPluginIcon()
+    pluginTabIcons.set(entry, icon)
+    return icon
+  }
+
+  function createDefaultPluginIcon(): Element {
+    const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+    svg.setAttribute('viewBox', '0 0 24 24')
+    svg.setAttribute('fill', 'none')
+    svg.setAttribute('stroke', 'currentColor')
+    svg.setAttribute('stroke-width', '2.5')
+    svg.setAttribute('stroke-linecap', 'round')
+    svg.setAttribute('stroke-linejoin', 'round')
+    svg.setAttribute('aria-hidden', 'true')
+    const path = document.createElementNS('http://www.w3.org/2000/svg', 'path')
+    path.setAttribute('d', 'M19.439 7.85c-.049.322.059.648.289.878l1.568 1.568c.47.47.706 1.087.706 1.704s-.235 1.233-.706 1.704l-1.611 1.611a.98.98 0 0 1-.837.276c-.47-.07-.802-.48-.968-.925a2.501 2.501 0 1 0-3.214 3.214c.446.166.855.497.925.968a.979.979 0 0 1-.276.837l-1.61 1.61a2.404 2.404 0 0 1-1.705.707 2.402 2.402 0 0 1-1.704-.706l-1.568-1.568a1.026 1.026 0 0 0-.877-.29c-.493.074-.84.504-1.02.968a2.5 2.5 0 1 1-3.237-3.237c.464-.18.894-.527.967-1.02a1.026 1.026 0 0 0-.289-.877L1.998 12c0-.617.236-1.234.706-1.704L4.23 8.77c.24-.24.581-.353.917-.303.515.077.877.528 1.073 1.01a2.5 2.5 0 1 0 3.259-3.259c-.482-.196-.933-.558-1.01-1.073-.05-.336.062-.676.303-.917l1.525-1.525A2.402 2.402 0 0 1 12 1.998c.617 0 1.234.236 1.704.706l1.568 1.568c.23.23.556.338.877.29.493-.074.84-.504 1.02-.968a2.5 2.5 0 1 1 3.237 3.237c-.464.18-.894.527-.967 1.02Z')
+    svg.append(path)
+    return svg
+  }
+
+  function mountElement(node: HTMLElement, element: Element | undefined) {
     let mountedElement: Element | undefined
-    const mount = (nextElement: Element) => {
+    const mount = (nextElement: Element | undefined) => {
       if (mountedElement === nextElement) return
-      node.replaceChildren(nextElement)
+      node.replaceChildren(...(nextElement ? [nextElement] : []))
       mountedElement = nextElement
     }
     mount(element)
@@ -459,6 +577,41 @@
       destroy() {
         node.replaceChildren()
         mountedElement = undefined
+      },
+    }
+  }
+
+  function pluginView(node: HTMLElement, entry: PluginTabEntry) {
+    let dispose: (() => void) | undefined
+    let current = entry
+    const mount = (next: PluginTabEntry) => {
+      dispose?.()
+      dispose = undefined
+      node.replaceChildren()
+      if (!plugins) return
+      const container = document.createElement('div')
+      container.className = 'h-full min-h-0 overflow-auto bg-[var(--app-surface)] text-[var(--app-text)]'
+      node.append(container)
+      try {
+        const result = next.tab.mount(container, plugins.createViewContext(next.pluginId, next.tab))
+        if (typeof result === 'function') dispose = result
+      } catch (error) {
+        console.error(`[plugins] failed to mount tab "${next.id}"`, error)
+        container.className = 'p-4 text-sm text-red-600'
+        container.textContent = `プラグインの表示に失敗しました: ${error instanceof Error ? error.message : String(error)}`
+      }
+    }
+    mount(entry)
+    return {
+      update(next: PluginTabEntry) {
+        if (next === current) return
+        current = next
+        mount(next)
+      },
+      destroy() {
+        dispose?.()
+        dispose = undefined
+        node.replaceChildren()
       },
     }
   }
@@ -482,7 +635,7 @@
 
   const refresh = (next = vm.snapshot(), source: 'main' | 'worker' = 'main', draw = true) => {
     snapshot = next
-    if (draw && !runtimeInWorker) requestAnimationFrame(() => renderer.requestDraw(snapshot))
+    if (draw && !runtimeInWorker) requestAnimationFrame(() => { if (!editorDestroyed && stageMounted) renderer.requestDraw(snapshot) })
     if (runtimeInWorker && source === 'main' && !applyingWorkerSnapshot) runtimeWorker.sync(next)
   }
 
@@ -544,8 +697,20 @@
     }
   }
 
+  function updateStageQuestion(payload: { question?: string | null; questionId?: string | null; answer?: string }) {
+    if ('question' in payload) {
+      stageQuestionId = payload.questionId ?? `event-${++questionSerial}`
+      stageQuestion = payload.question ?? null
+    } else if ('answer' in payload) stageQuestion = null
+  }
+
   const unsubscribers = [
+    vm.on<{ question?: string | null; questionId?: string | null; answer?: string }>('QUESTION', updateStageQuestion),
+    vm.on<{ message?: string }>('ERROR', (payload) => {
+      status = payload?.message || 'Runtime error'
+    }),
     vm.on<RuntimeSnapshot>('PROJECT_LOADED', (next) => {
+      stageQuestion = null
       status = 'Project loaded'
       workspaceTargetId = ''
       deferredBlocklyTargetId = ''
@@ -672,7 +837,7 @@
       renderer.requestDraw(snapshot)
     }
   }
-  $: if (stageCanvas && !runtimeInWorker && !snapshot.running) renderer.requestDraw(snapshot)
+  $: if (stageMounted && stageCanvas && !runtimeInWorker && !snapshot.running) renderer.requestDraw(snapshot)
   $: installBrowserTestApi()
 
   onMount(() => {
@@ -683,31 +848,70 @@
     unsubscribeContextHeader = context.subscribeHeader?.((nextHeader) => {
       header = nextHeader
     })
+    if (plugins) {
+      unsubscribePluginTabs = plugins.subscribeTabs((entries) => {
+        pluginTabEntries = entries
+      })
+    }
     applyColorScheme(preferredColorScheme())
     registerScratchBlocklyBlocks()
     mountBlockly()
-    runtimeInWorker = runtimeWorker.attachCanvas(stageCanvas, snapshot)
-    if (!runtimeInWorker) renderer.attachCanvas(stageCanvas)
-    attachedStageCanvas = stageCanvas
-    stageMounted = true
-    vm.attachRenderer(renderer)
-    vm.attachAudioEngine(createRuntimeAudioEngine())
-    if (!runtimeInWorker) {
+    try {
+      runtimeInWorker = runtimeWorker.attachCanvas(stageCanvas, snapshot)
+      if (!runtimeInWorker) renderer.attachCanvas(stageCanvas)
+      attachedStageCanvas = stageCanvas
+      vm.attachRenderer(renderer)
+      vm.attachAudioEngine(createRuntimeAudioEngine())
+      stageMounted = true
+    } catch (cause) {
+      if (!onInitializationError) throw cause
+      onInitializationError(cause)
+      return
+    }
+    if (plugins) {
+      plugins.attach({
+        vm,
+        on: (event, listener) => vm.on(event, listener),
+        getState: () => pluginState,
+        ui: {
+          getTheme: () => colorScheme,
+          setTheme: (theme) => applyColorScheme(theme),
+          toggleTheme: toggleColorScheme,
+          notify: (message, kind) => showPluginNotification(message, kind),
+        },
+      })
+    }
+    if (!runtimeInWorker && backend?.executionDriver !== 'backend') {
       tickTimer = setInterval(() => {
         if (vm.isRunning()) vm.step()
       }, 1000 / 30)
     }
+    // The compile summary is produced during load, which may happen before the
+    // first runtime frame, so poll it instead of relying on frame events.
+    if (backend?.llvmStats) {
+      llvmStatsTimer = setInterval(() => {
+        const next = backend.llvmStats?.()
+        if (next) llvmStats = next
+      }, 250)
+    }
     window.addEventListener('keydown', handleKeyDown, { capture: true })
     window.addEventListener('keyup', handleKeyUp, { capture: true })
     window.addEventListener('blur', cancelStageSpriteDrag)
+    window.addEventListener('blur', clearQuestionKeys)
     window.addEventListener('popstate', handleHistoryPop)
   })
 
   onDestroy(() => {
+    editorDestroyed = true
     unsubscribeContextTabs?.()
     unsubscribeContextHeader?.()
+    unsubscribePluginTabs?.()
+    plugins?.detach()
+    for (const timer of pluginToastTimers) clearTimeout(timer)
+    pluginToastTimers.clear()
     unsubscribers.forEach((unsubscribe) => unsubscribe())
     if (tickTimer) clearInterval(tickTimer)
+    if (llvmStatsTimer) clearInterval(llvmStatsTimer)
     if (visualReportTimer) clearTimeout(visualReportTimer)
     endStagePaneResize()
     cancelContinuousFlyoutScroll()
@@ -722,6 +926,7 @@
     disposeVectorPaperScope()
     runtimeWorker.dispose()
     renderer.dispose()
+    void Promise.resolve().then(() => backend?.dispose?.()).catch((error) => console.error('Runtime backend disposal failed', error))
     stopRecordingSound(false)
     stopPreviewSound()
     stopRuntimeSounds()
@@ -736,6 +941,7 @@
     window.removeEventListener('keydown', handleKeyDown, { capture: true })
     window.removeEventListener('keyup', handleKeyUp, { capture: true })
     window.removeEventListener('blur', cancelStageSpriteDrag)
+    window.removeEventListener('blur', clearQuestionKeys)
     window.removeEventListener('popstate', handleHistoryPop)
   })
 
@@ -952,7 +1158,7 @@
     const sprite = vm.addSprite(item.name)
     try {
       for (const [index, costume] of item.costumes.entries()) {
-        const response = await fetch(`/assets-scratch/images/${costume.md5ext}`)
+        const response = await fetch(assetUrl(`assets-scratch/images/${costume.md5ext}`))
         if (!response.ok) throw new Error(`Could not load ${costume.name}`)
         const bytes = new Uint8Array(await response.arrayBuffer())
         const target = vm.getTarget(sprite.name)
@@ -980,7 +1186,7 @@
         else vm.addCostume(sprite.name, meta)
       }
       for (const sound of item.sounds) {
-        const response = await fetch(`/assets-scratch/sounds/${sound.md5ext}`)
+        const response = await fetch(assetUrl(`assets-scratch/sounds/${sound.md5ext}`))
         if (!response.ok) throw new Error(`Could not load ${sound.name}`)
         const bytes = new Uint8Array(await response.arrayBuffer())
         const asset = await vm.storeAsset(bytes, sound.dataFormat)
@@ -1041,7 +1247,7 @@
     const target = vm.getStage()
     if (!target) return
     try {
-      const response = await fetch(`/assets-scratch/images/${item.md5ext}`)
+      const response = await fetch(assetUrl(`assets-scratch/images/${item.md5ext}`))
       if (!response.ok) throw new Error(`Could not load ${item.name}`)
       const bytes = new Uint8Array(await response.arrayBuffer())
       const asset = await vm.storeAsset(bytes, item.dataFormat)
@@ -1083,7 +1289,7 @@
   async function addLibraryCostume(item: (typeof costumeLibrary)[number] = costumeLibrary[0]) {
     if (!selectedTarget) return
     try {
-      const response = await fetch(`/assets-scratch/images/${item.md5ext}`)
+      const response = await fetch(assetUrl(`assets-scratch/images/${item.md5ext}`))
       if (!response.ok) throw new Error(`Could not load ${item.name}`)
       const bytes = new Uint8Array(await response.arrayBuffer())
       const svgText = item.dataFormat === 'svg' ? new TextDecoder().decode(bytes) : ''
@@ -1120,7 +1326,7 @@
   async function addLibrarySound(item: (typeof soundLibrary)[number] = soundLibrary[0]) {
     if (!selectedTarget) return
     try {
-      const response = await fetch(`/assets-scratch/sounds/${item.md5ext}`)
+      const response = await fetch(assetUrl(`assets-scratch/sounds/${item.md5ext}`))
       if (!response.ok) throw new Error(`Could not load ${item.name}`)
       const bytes = new Uint8Array(await response.arrayBuffer())
       const asset = await vm.storeAsset(bytes, item.dataFormat)
@@ -1718,6 +1924,7 @@
   }
 
   function startProject() {
+    stageQuestion = null
     const context = ensureRuntimeAudioContext()
     void context.resume()
     if (runtimeInWorker) runtimeWorker.greenFlag()
@@ -1725,6 +1932,7 @@
   }
 
   function stopProject() {
+    stageQuestion = null
     stopRuntimeSounds()
     if (runtimeInWorker) runtimeWorker.stopAll()
     else vm.stopAll()
@@ -1735,12 +1943,19 @@
     const context = ensureRuntimeAudioContext()
     void context.resume()
     if (runtimeInWorker) runtimeWorker.step()
-    else vm.step()
+    else {
+      try {
+        vm.step()
+      } catch (error) {
+        status = error instanceof Error ? error.message : String(error)
+      }
+    }
   }
 
   function toggleStageFullscreen() {
     stageFullscreen = !stageFullscreen
     tick().then(() => {
+      if (editorDestroyed) return
       if (workspace) Blockly.svgResize(workspace)
       renderer.requestDraw(snapshot)
     })
@@ -1779,6 +1994,7 @@
     window.removeEventListener('pointerup', endStagePaneResize)
     window.removeEventListener('pointercancel', endStagePaneResize)
     tick().then(() => {
+      if (editorDestroyed) return
       if (workspace) Blockly.svgResize(workspace)
       renderer.requestDraw(snapshot)
     })
@@ -1789,6 +2005,7 @@
     event.preventDefault()
     stagePaneWidth = clampStagePaneWidth(stagePaneWidth + (event.key === 'ArrowLeft' ? 24 : -24))
     tick().then(() => {
+      if (editorDestroyed) return
       if (workspace) Blockly.svgResize(workspace)
       renderer.requestDraw(snapshot)
     })
@@ -4494,7 +4711,17 @@
     stageSpriteDrag = undefined
   }
 
+  const questionKeys = new Set<string>()
+  const runtimeKeys = new Set<string>()
+  function clearQuestionKeys() { questionKeys.clear(); runtimeKeys.clear() }
+  function isQuestionInput(target: EventTarget | null): boolean {
+    return target instanceof HTMLInputElement && target.dataset.testid === 'stage-answer-input'
+  }
   function handleKeyDown(event: KeyboardEvent) {
+    if (isQuestionInput(event.target)) {
+      questionKeys.add(event.code || event.key)
+      return
+    }
     if (libraryPanel && event.key === 'Escape') {
       event.preventDefault()
       closeLibraryFromButton()
@@ -4577,12 +4804,17 @@
       }
     }
     if (isScratchRuntimeKey(event)) event.preventDefault()
+    runtimeKeys.add(event.code || event.key)
     const data = { key: scratchKeyName(event), isDown: true, pressed: true }
     if (runtimeInWorker) runtimeWorker.postKeyboard(data)
     else vm.postKeyboard(data)
   }
 
   function handleKeyUp(event: KeyboardEvent) {
+    const key = event.code || event.key
+    const questionKey = questionKeys.delete(key)
+    const runtimeKey = runtimeKeys.delete(key)
+    if (!runtimeKey && (questionKey || isQuestionInput(event.target))) return
     if (isScratchRuntimeKey(event)) event.preventDefault()
     const data = { key: scratchKeyName(event), isDown: false, pressed: false }
     if (runtimeInWorker) runtimeWorker.postKeyboard(data)
@@ -5168,13 +5400,26 @@
     const targetId = selectedTarget.id ?? selectedTarget.name
     if (block.outputConnection) {
       if (runtimeInWorker) runtimeWorker.reportBlockValue(block.id, targetId)
-      else vm.reportBlockValue(block.id, targetId)
+      else {
+        try {
+          vm.reportBlockValue(block.id, targetId)
+        } catch (error) {
+          status = error instanceof Error ? error.message : String(error)
+        }
+      }
       return
     }
     const rootBlock = (block?.getRootBlock() ?? block) as Blockly.BlockSvg | null
     if (!rootBlock || rootBlock.isInFlyout) return
     if (runtimeInWorker) runtimeWorker.toggleScript(rootBlock.id, targetId)
-    else vm.toggleScript(rootBlock.id, targetId)
+    else {
+      try {
+        vm.toggleScript(rootBlock.id, targetId)
+      } catch (error) {
+        status = error instanceof Error ? error.message : String(error)
+        return
+      }
+    }
     status = 'Script toggled'
   }
 
@@ -5513,11 +5758,15 @@
     {exportProject}
     {exportSb3}
     {toggleTurboMode}
+    {runtimeOptions}
+    {selectedRuntime}
+    {onRuntimeChange}
     greenFlag={startProject}
     stopAll={stopProject}
     stepRuntime={stepProjectRuntime}
     {colorScheme}
     {toggleColorScheme}
+    {plugins}
   />
 
   <section class="editor-shell grid min-h-0 flex-1 grid-cols-1 grid-rows-[minmax(0,1fr)_auto] overflow-hidden lg:grid-cols-[minmax(420px,1fr)_8px_var(--stage-pane-width)] lg:grid-rows-1" style={`--stage-pane-width: ${stagePaneWidth}px;`}>
@@ -5536,15 +5785,15 @@
               <span class="truncate">{tab.label}</span>
             </button>
           {/each}
-          {#each orderedContextTabs as item (item.tab)}
+          {#each orderedContextTabs as item (item.id)}
             <button
               data-testid={`main-tab-${item.id}`}
               class={`relative -mb-px flex h-[39px] min-w-[104px] items-center justify-center gap-1.5 rounded-t-[18px] border px-4 text-sm font-bold transition-colors ${selectedExternalTabId === item.id ? 'z-10 border-[#b8c6d8] border-b-white bg-white text-[#855cd6]' : 'border-[#b8c6d8] bg-[#d3dfef] text-[#68758a] hover:bg-[#e7eff9] hover:text-[#575e75]'}`}
               aria-current={selectedExternalTabId === item.id ? 'page' : undefined}
               on:click={() => selectExternalTab(item.id)}
             >
-              <span class="flex h-[18px] w-[18px] shrink-0 items-center justify-center [&>*]:h-[18px] [&>*]:w-[18px]" use:mountElement={item.tab.icon}></span>
-              <span class="truncate">{item.tab.label}</span>
+              <span class="flex h-[18px] w-[18px] shrink-0 items-center justify-center [&>*]:h-[18px] [&>*]:w-[18px]" use:mountElement={item.icon}></span>
+              <span class="truncate">{item.label}</span>
             </button>
           {/each}
           <div class="hidden">
@@ -5946,8 +6195,10 @@
             {endSoundTrimHandle}
             {updateSoundTrim}
           />
+        {:else if activeContextTab?.plugin}
+          <div class="h-full min-h-0 overflow-hidden" use:pluginView={activeContextTab.plugin}></div>
         {:else if activeContextTab}
-          <div class="h-full min-h-0 overflow-hidden" use:mountElement={activeContextTab.tab.content}></div>
+          <div class="h-full min-h-0 overflow-hidden" use:mountElement={activeContextTab.content}></div>
         {:else if !selectedExternalTabId && selectedTab !== 'code'}
           <div class="flex min-h-[28rem] items-center justify-center text-sm text-slate-500">
             Select a tab to edit assets.
@@ -5972,7 +6223,14 @@
         {stageFullscreen}
         {snapshot}
         {fps}
+        {llvmStats}
         {visibleMonitors}
+        question={stageQuestion}
+        questionId={stageQuestionId}
+        answerQuestion={(answer) => {
+          if (runtimeInWorker) { stageQuestion = null; runtimeWorker.answerPrompt(answer) }
+          else vm.answerPrompt(answer)
+        }}
         {toggleStageFullscreen}
         {pickSprite}
         {updateMouse}
@@ -6025,4 +6283,12 @@
       />
     </aside>
   </section>
+
+  {#if pluginToasts.length > 0}
+    <div class="plugin-toasts" aria-live="polite" aria-relevant="additions">
+      {#each pluginToasts as toast (toast.id)}
+        <div class="plugin-toast" data-kind={toast.kind} role="status">{toast.message}</div>
+      {/each}
+    </div>
+  {/if}
 </main>

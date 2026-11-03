@@ -1,0 +1,17 @@
+import http from 'node:http';
+import {readFile, mkdtemp} from 'node:fs/promises';
+import {spawn} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import path from 'node:path';
+const src=fileURLToPath(new URL('.',import.meta.url));
+const out=fileURLToPath(new URL('../.work/real-loader/',import.meta.url));
+const profile=await mkdtemp(path.join(out,'browser-profile-'));
+let finish;const done=new Promise(r=>finish=r);
+const page=`<script>const w=new Worker('/browser-worker.js');w.onmessage=e=>fetch('/result',{method:'POST',body:JSON.stringify(e.data)});w.onerror=e=>fetch('/result',{method:'POST',body:JSON.stringify({status:1,reason:e.message})});</script>`;
+const allowed=new Set(['/browser-worker.js','/browser.js','/browser.wasm']);
+const server=http.createServer(async(req,res)=>{try{const p=new URL(req.url,'http://localhost').pathname;if(p==='/result'&&req.method==='POST'){let data='';for await(const c of req)data+=c;finish(JSON.parse(data));res.end('ok');return;}if(p==='/'){res.setHeader('content-type','text/html');res.end(page);return;}if(!allowed.has(p)){res.writeHead(404).end();return;}res.setHeader('content-type',p.endsWith('.wasm')?'application/wasm':'text/javascript');res.end(await readFile(path.join(p==='/browser-worker.js'?src:out,p)));}catch(e){finish({status:1,reason:String(e)});res.writeHead(500).end();}});
+await new Promise(r=>server.listen(0,'127.0.0.1',r));
+const browser=spawn(process.env.BROWSER||'brave',['--headless','--no-sandbox','--disable-gpu','--disable-background-networking',`--user-data-dir=${profile}`,`http://127.0.0.1:${server.address().port}/`],{stdio:'ignore'});
+browser.on('error',e=>finish({status:1,reason:String(e)}));
+const timer=setTimeout(()=>finish({status:1,reason:'browser timed out'}),30000);
+const result=await done;clearTimeout(timer);browser.kill();server.close();console.log(JSON.stringify(result,null,2));if(result.status!==0 || !result.lines?.includes('PASS: close final reference')) process.exitCode=1;

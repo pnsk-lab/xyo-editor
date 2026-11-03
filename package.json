@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter xyo-editor dev",
     "build": "pnpm --filter @hikkaku/vm build && pnpm --filter xyo-editor build",
-    "check": "pnpm --filter @hikkaku/vm check && pnpm --filter xyo-editor check",
+    "check": "pnpm --filter @hikkaku/vm check && pnpm --filter @hikkaku/llvm-wasm check && pnpm --filter xyo-editor check",
     "test": "pnpm --filter @hikkaku/vm test",
     "test:compat": "pnpm --filter @hikkaku/vm test:compat",
     "test:performance": "pnpm --filter @hikkaku/vm test:performance",

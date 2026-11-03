@@ -1,0 +1,8 @@
+/cache/
+/browser-profile-*/
+/*.wasm
+/*.o
+/main.cjs
+/main.js
+/browser.js
+/*.log

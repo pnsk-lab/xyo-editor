@@ -1,0 +1,21 @@
+diff --git a/src/engine/runtime.hpp b/src/engine/runtime.hpp
+index 6633158..3b2d643 100644
+--- a/src/engine/runtime.hpp
++++ b/src/engine/runtime.hpp
+@@ -163,6 +165,16 @@ public:
+     std::vector<Thread*> threads;
+     std::unordered_map<std::string, Thread*> threadMap;
+ 
++    // 区間コンパイル: ブロック id → コンパイル済み関数（yield しない連続区間）。
++    // インタプリタがブロックを実行する直前に引き、あればまとめて実行して
++    // 区間長ぶん進める。登録はホストが行い、未登録なら従来通り解釈する。
++    struct CompiledSegment {
++        void* entry = nullptr;
++        uint32_t blocks = 0;
++        uint64_t hits = 0;
++    };
++    std::unordered_map<std::string, CompiledSegment> segments;
++
+     std::unique_ptr<Blocks> monitorBlocks;
+     std::unique_ptr<Blocks> flyoutBlocks;
+     std::unordered_map<std::string, HatMeta> hats;

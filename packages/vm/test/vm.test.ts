@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'bun:test'
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { ArgumentType, Asset, AssetType, BitmapAdapter, BlockType, Cast, Clone, Color, DataFormat, Helper, MathUtil, SVGRenderer, ScratchCanvasRenderer, ScratchStorage, ScratchVM, StringUtil, TargetType, costumeUpload, createDefaultProject, createVMAsset, defineMessages, extractFileName, getMonitorIdForBlockWithArgs, getProjectTitleFromFilename, loadSvgString, normalizeProject, parse, parseScratchProject, sanitizeSvg, scratchFetch, serializeSvgToString, soundUpload, spriteUpload, toListIndex, uid, unpackScratchInput, validate, validateProject, type RuntimeSnapshot, type ScratchBlock, type ScratchTarget } from '../src/index'
 
@@ -1636,10 +1636,11 @@ describe('ScratchVM clean-room core', () => {
     expect(vm.getVariableValue('Sprite1', 'received')).toBe('1')
   })
 
-  it('keeps broadcast menu literals as inputs when importing Scratch archives', async () => {
-    const fixturePath = join(import.meta.dir, '../../../..', 'Scratch Week Comics (FEATURED).sb3')
+  // Needs a real archive that is not part of the repository; skip when it is absent.
+  const externalArchive = join(import.meta.dir, '../../../..', 'Scratch Week Comics (FEATURED).sb3')
+  ;(existsSync(externalArchive) ? it : it.skip)('keeps broadcast menu literals as inputs when importing Scratch archives', async () => {
     const vm = new ScratchVM()
-    await vm.loadProject(readFileSync(fixturePath))
+    await vm.loadProject(readFileSync(externalArchive))
 
     const page2 = vm.getTarget('Page2')
     const broadcastInputName = (block: ScratchBlock | undefined) => {

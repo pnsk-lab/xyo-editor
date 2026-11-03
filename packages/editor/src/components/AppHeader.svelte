@@ -1,7 +1,9 @@
 <script lang="ts">
-  import { Blocks, ChevronDown, Download, FileText, Flag, FolderOpen, Moon, Pencil, Plus, Settings, Square, StepForward, Sun, Zap } from 'lucide-svelte'
+  import { Blocks, ChevronDown, Download, FileText, Flag, FolderOpen, Moon, Pencil, Plus, Settings, Square, StepForward, Sun } from 'lucide-svelte'
+  import SettingsDialog from '../features/Settings/SettingsDialog.svelte'
   import type { RuntimeSnapshot } from '@hikkaku/vm'
   import type { EditorHeaderButton, EditorHeaderConfig, EditorHeaderLogo } from '../lib/editor-context'
+  import type { PluginHost } from '../lib/plugins'
 
   let {
     projectTitle = $bindable(''),
@@ -13,11 +15,15 @@
     exportProject,
     exportSb3,
     toggleTurboMode,
+    runtimeOptions = [],
+    selectedRuntime = '',
+    onRuntimeChange,
     greenFlag,
     stopAll,
     stepRuntime,
     colorScheme,
     toggleColorScheme,
+    plugins,
   } = $props<{
     projectTitle: string
     header?: EditorHeaderConfig
@@ -28,12 +34,18 @@
     exportProject: () => void
     exportSb3: () => void
     toggleTurboMode: () => void
+    runtimeOptions?: { value: string; label: string }[]
+    selectedRuntime?: string
+    onRuntimeChange?: (value: string) => void
     greenFlag: () => void
     stopAll: () => void
     stepRuntime: () => void
     colorScheme: 'light' | 'dark'
     toggleColorScheme: () => void
+    plugins?: PluginHost
   }>()
+
+  let settingsOpen = $state(false)
 
   const closeOpenMenu = (event: MouseEvent) => {
     const details = (event.currentTarget as HTMLElement).closest('details')
@@ -97,28 +109,10 @@
     </div>
 
     <nav class="flex h-full items-center text-[13px] font-bold">
-      <details class="menu">
-        <summary class="menu-trigger">
-          <Settings size={20} strokeWidth={3} />
-          <span>設定</span>
-          <ChevronDown size={14} strokeWidth={3} />
-        </summary>
-        <div class="menu-panel w-52">
-          <button class="menu-item" onclick={toggleColorScheme}>
-            {#if colorScheme === 'dark'}
-              <Sun size={17} />
-              <span>ライトモード</span>
-            {:else}
-              <Moon size={17} />
-              <span>ダークモード</span>
-            {/if}
-          </button>
-          <button class="menu-item" onclick={toggleTurboMode}>
-            <Zap size={17} class={snapshot.turboMode ? 'text-[#ffab19]' : ''} />
-            <span>{snapshot.turboMode ? 'Turbo をオフ' : 'Turbo をオン'}</span>
-          </button>
-        </div>
-      </details>
+      <button class="menu-trigger" type="button" onclick={() => (settingsOpen = true)} aria-haspopup="dialog">
+        <Settings size={20} strokeWidth={3} />
+        <span>設定</span>
+      </button>
 
       <details class="menu">
         <summary class="menu-trigger">
@@ -212,8 +206,15 @@
     </div>
   {/if}
 
+  <button class="menu-trigger" type="button" onclick={toggleColorScheme} aria-label={colorScheme === 'dark' ? 'ライトモードに切り替え' : 'ダークモードに切り替え'} title={colorScheme === 'dark' ? 'ライトモードに切り替え' : 'ダークモードに切り替え'}>
+    {#if colorScheme === 'dark'}<Sun size={20} />{:else}<Moon size={20} />{/if}
+  </button>
   <span class="sr-only" aria-live="polite">{status}</span>
 </header>
+
+{#if settingsOpen}
+  <SettingsDialog turboMode={snapshot.turboMode} {toggleTurboMode} {runtimeOptions} {selectedRuntime} {onRuntimeChange} {plugins} close={() => (settingsOpen = false)} />
+{/if}
 
 <style>
   .header-logo-slot,
@@ -298,16 +299,20 @@
   }
 
   .menu-panel {
-    background: #ffffff;
-    border: 1px solid rgb(0 0 0 / 0.16);
+    background: var(--app-surface-raised);
+    border: 1px solid var(--app-border);
     border-radius: 0 0 6px 6px;
     box-shadow: 0 10px 24px rgb(15 23 42 / 0.18);
-    color: #172b4d;
+    color: var(--app-text);
     left: 0;
     padding: 6px 0;
     position: absolute;
     top: 100%;
     z-index: 60;
+  }
+
+  :global(:root[data-theme='dark']) .menu-panel {
+    box-shadow: 0 14px 32px rgb(0 0 0 / 0.5);
   }
 
   /* Native details keeps its keyboard semantics while animating the panel. */
@@ -351,7 +356,11 @@
   }
 
   .menu-item:hover {
-    background: #eef2ff;
+    background: var(--app-hover);
+  }
+
+  :global(:root[data-theme='dark']) .menu-item:hover {
+    background: #233149;
   }
 
   .header-link {

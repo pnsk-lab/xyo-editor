@@ -1,0 +1,52 @@
+diff --git a/src/blocks/core.cpp b/src/blocks/core.cpp
+index 9a8a9c3..c9027f0 100644
+--- a/src/blocks/core.cpp
++++ b/src/blocks/core.cpp
+@@ -1046,6 +1046,7 @@ Value snsAskAndWait(const ArgValues& a, BlockUtility& u) {
+     Runtime* rt = u.runtime();
+     Target* t = u.target();
+     Runtime::AskEntry e;
++    e.id = rt->allocateQuestionId();
+     e.question = toStr(v(a, "QUESTION"));
+     e.thread = u.thread;
+     e.target = t;
+diff --git a/src/engine/runtime.hpp b/src/engine/runtime.hpp
+index 6633158..9e3efc9 100644
+--- a/src/engine/runtime.hpp
++++ b/src/engine/runtime.hpp
+@@ -1,6 +1,8 @@
+ // xyo-cpp: engine/runtime.js 相当 — ランタイム中核。
+ #pragma once
+ 
++#include <cstdlib>
++#include <cstdint>
+ #include <deque>
+ #include <functional>
+ #include <map>
+@@ -217,7 +219,14 @@ public:
+     // --- コアブロックパッケージ状態 ---
+     double controlCounter = 0;                    // control_get_counter
+     std::u16string answer;                        // sensing_answer
++    // 0 means exhausted. Never reset this counter on stop/green flag.
++    uint64_t nextQuestionId = 1;
++    uint64_t allocateQuestionId() {
++        if (!nextQuestionId) std::abort(); // fail closed, never reuse an ID
++        return nextQuestionId++;
++    }
+     struct AskEntry {                             // ask and wait キュー
++        uint64_t id = 0;
+         std::u16string question;
+         Thread* thread;
+         Target* target;
+diff --git a/src/jit/rt_blocks.cpp b/src/jit/rt_blocks.cpp
+index e1322a0..9764e90 100644
+--- a/src/jit/rt_blocks.cpp
++++ b/src/jit/rt_blocks.cpp
+@@ -662,6 +662,7 @@ void xyo_sns_askwait(JitCtx* c, uint64_t question) {
+     Runtime* rt = c->runtime;
+     Target* t = c->target;
+     Runtime::AskEntry e;
++    e.id = rt->allocateQuestionId();
+     e.question = u16(toV(question));
+     e.thread = c->thread;
+     e.target = t;

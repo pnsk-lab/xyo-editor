@@ -1,10 +1,12 @@
-import type { RuntimeSnapshot, ScratchCostume, ScratchSound, ScratchVM } from '@hikkaku/vm'
+import type { RuntimeSnapshot, ScratchCostume, ScratchSound } from '@hikkaku/vm'
+import type { RuntimeVM } from './runtime-backends'
 
 type RuntimeWorkerEvent =
   | { type: 'snapshot'; event: string; snapshot: RuntimeSnapshot; syncId?: number }
   | { type: 'soundPlayed'; targetName: string; sound: ScratchSound; snapshot: RuntimeSnapshot; syncId?: number }
   | { type: 'soundsStopped'; snapshot: RuntimeSnapshot; syncId?: number }
   | { type: 'visualReport'; id: string; value: string; snapshot: RuntimeSnapshot; syncId?: number }
+  | { type: 'question'; payload: { question?: string | null; answer?: string }; syncId: number; resetId: number }
   | { type: 'fps'; fps: number }
   | { type: 'error'; message: string }
 
@@ -22,21 +24,24 @@ export class RuntimeWorkerController {
   private latestSyncId = 0
   private latestProjectSyncId = 0
   private appliedProjectSyncId = 0
+  private questionFence = 0
   private initPosted?: Promise<void>
   private queuedRuntimeCommands: Array<() => void> = []
 
   constructor(
-    private readonly vm: ScratchVM,
+    private readonly vm: RuntimeVM,
     private readonly onSnapshot: SnapshotHandler,
     private readonly onError: (message: string) => void = () => {},
     private readonly onSoundPlayed: SoundHandler = () => {},
     private readonly onSoundsStopped: (snapshot: RuntimeSnapshot) => void = () => {},
     private readonly onVisualReport: VisualReportHandler = () => {},
     private readonly onFps: (fps: number) => void = () => {},
+    private readonly supported = true,
+    private readonly onQuestion: (payload: { question?: string | null; answer?: string }) => void = () => {},
   ) {}
 
   attachCanvas(canvas: HTMLCanvasElement, snapshot: RuntimeSnapshot): boolean {
-    if (!RUNTIME_WORKER_ENABLED) return false
+    if (!RUNTIME_WORKER_ENABLED || !this.supported) return false
     if (this.transferredCanvas === canvas) return this.initialized
     if (!('transferControlToOffscreen' in canvas)) return false
     if (this.initialized) {
@@ -66,6 +71,10 @@ export class RuntimeWorkerController {
       else if (message.type === 'soundPlayed') this.onSoundPlayed(message.targetName, message.sound, message.snapshot)
       else if (message.type === 'soundsStopped') this.onSoundsStopped(message.snapshot)
       else if (message.type === 'visualReport') this.onVisualReport(message.id, message.value, message.snapshot)
+      else if (message.type === 'question') {
+        if (message.resetId < this.questionFence || message.syncId < Math.max(this.latestProjectSyncId, this.appliedProjectSyncId)) return
+        this.onQuestion(message.payload)
+      }
       else if (message.type === 'fps') this.onFps(message.fps)
       else if (message.type === 'error') this.onError(message.message)
     }
@@ -91,10 +100,13 @@ export class RuntimeWorkerController {
   }
 
   greenFlag(): void {
-    this.postRuntimeCommandWithImages({ type: 'greenFlag' }, this.vm.lightweightSnapshot())
+    const syncId = ++this.latestSyncId
+    this.questionFence = syncId
+    this.postRuntimeCommandWithImages({ type: 'greenFlag' }, this.vm.lightweightSnapshot(), syncId)
   }
 
   stopAll(): void {
+    this.questionFence = this.latestSyncId + 1
     this.postRuntimeCommand({ type: 'stopAll' })
   }
 
@@ -112,6 +124,10 @@ export class RuntimeWorkerController {
 
   setTurboMode(enabled: boolean): void {
     this.postRuntimeCommand({ type: 'setTurboMode', enabled })
+  }
+
+  answerPrompt(value: string): void {
+    this.postRuntimeCommand({ type: 'answerPrompt', value })
   }
 
   postMouse(data: unknown): void {
@@ -205,11 +221,11 @@ export class RuntimeWorkerController {
     else post()
   }
 
-  private postRuntimeCommandWithImages(command: Record<string, unknown>, snapshot: RuntimeSnapshot): void {
+  private postRuntimeCommandWithImages(command: Record<string, unknown>, snapshot: RuntimeSnapshot, syncId: number): void {
     const post = () => {
       void this.rasterizeCostumes(snapshot).then((images) => {
         this.worker?.postMessage(
-          { ...command, images, syncId: ++this.latestSyncId },
+          { ...command, images, syncId },
           transferImages(images),
         )
       })

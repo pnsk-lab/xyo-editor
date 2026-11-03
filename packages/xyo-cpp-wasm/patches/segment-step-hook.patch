@@ -1,0 +1,57 @@
+diff --git a/src/engine/sequencer.cpp b/src/engine/sequencer.cpp
+index 436b0f7..70fbf77 100644
+--- a/src/engine/sequencer.cpp
++++ b/src/engine/sequencer.cpp
+@@ -227,16 +238,52 @@ void Sequencer::stepThreadBound(Thread& thread, size_t minDepth) {
+     }
+     while (thread.stack.size() > minDepth &&
+            !(currentBlockId = thread.peekStack()).empty()) {
++#ifdef XYO_SAFE_WASM_RUNTIME
++        if (minDepth == 0 && wasm::tryRunSafeFlag(thread)) {
++            if (thread.status == STATUS_DONE) return;
++            continue;
++        }
++#endif
+         const size_t initialStackSize = thread.stack.size();
+         bool isWarpMode = thread.peekStackFrame()->warpMode;
+         if (isWarpMode && !thread.hasWarpTimer) {
+             thread.hasWarpTimer = true;
+             thread.warpTimer.start();
+         }
++        // 区間コンパイル: このブロックが区間の先頭なら、コンパイル済み関数を
++        // 一度呼んで区間長ぶん進める。区間は yield しない連続ブロックなので、
++        // 実行後に状態を見る必要はない（通常の goToNextBlock と同じ前進）。
++        if (thread.target != nullptr && !runtime.segments.empty()) {
++            auto segment = runtime.segments.find(currentBlockId);
++            if (segment != runtime.segments.end() && segment->second.entry) {
++                JitCtx* ctx = thread.jitCtx;
++                if (!ctx) {
++                    ctx = acquireJitCtx();
++                    ctx->thread = &thread;
++                    ctx->target = thread.target;
++                    ctx->runtime = &runtime;
++                    ctx->sequencer = this;
++                    ctx->compatEc = &thread.compatibilityStackFrame;
++                    ctx->fiber = nullptr;
++                    thread.jitCtx = ctx;
++                }
++                reinterpret_cast<ScriptFn>(segment->second.entry)(ctx);
++                ++segment->second.hits;
++                for (uint32_t n = 0; n < segment->second.blocks; ++n)
++                    thread.goToNextBlock();
++                thread.blockGlowInFrame = currentBlockId;
++                continue;
++            }
++        }
+         if (thread.target == nullptr) {
+             retireThread(thread);
+         } else {
++#ifdef XYO_SAFE_WASM_LOOP_EXPERIMENT
++            if (!(minDepth == 0 && wasm::tryRunFirstLoopBody(thread)))
++                execute(*this, thread);
++#else
+             execute(*this, thread);
++#endif
+             if (countBlocks) ++blockCounter.n;
+         }
+         thread.blockGlowInFrame = currentBlockId;

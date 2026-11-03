@@ -1,4 +1,6 @@
-import { ScratchVM, type VirtualMachine } from '@hikkaku/vm'
+import { ScratchCanvasRenderer, ScratchVM } from '@hikkaku/vm'
+import type { PluginHost } from './plugins'
+import type { RuntimeBackend, RuntimeVM } from './runtime-backends'
 
 export type EditorHeaderButton = {
   label?: string
@@ -37,7 +39,11 @@ export type EditorContextTab = {
 }
 
 export interface EditorContext {
-  vm: VirtualMachine
+  vm: RuntimeVM
+  /** The VM and renderer are selected together; absent for legacy contexts. */
+  backend?: RuntimeBackend
+  /** Plugin host attached to this editor; absent when plugins are not used. */
+  plugins?: PluginHost
   header?: EditorHeaderConfig
   tabs?: EditorContextTab[]
   addTab?: (tab: EditorContextTab) => () => void
@@ -47,7 +53,8 @@ export interface EditorContext {
   subscribeHeader?: (listener: (header: EditorHeaderConfig) => void) => () => void
 }
 
-export function createEditorContext(options: { header?: EditorHeaderConfig } = {}): EditorContext {
+export function createEditorContext(options: { header?: EditorHeaderConfig; backend?: RuntimeBackend; plugins?: PluginHost } = {}): EditorContext {
+  const backend = options.backend ?? { vm: new ScratchVM(), renderer: new ScratchCanvasRenderer(), worker: 'scratch' as const }
   const tabs: EditorContextTab[] = []
   const tabListeners = new Set<(tabs: EditorContextTab[]) => void>()
   const headerListeners = new Set<(header: EditorHeaderConfig) => void>()
@@ -62,7 +69,9 @@ export function createEditorContext(options: { header?: EditorHeaderConfig } = {
   }
 
   return {
-    vm: new ScratchVM(),
+    vm: backend.vm,
+    backend,
+    plugins: options.plugins,
     get header() {
       return header
     },
