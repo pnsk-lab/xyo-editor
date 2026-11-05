@@ -39,11 +39,23 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v5
 
+      - name: Fetch LLVM artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download llvm-artifacts-v1 \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern llvm-artifacts.tar.gz \
+            --output /tmp/llvm-artifacts.tar.gz
+          mkdir -p packages/editor/public
+          tar -xzf /tmp/llvm-artifacts.tar.gz -C packages/editor/public
+          test -f packages/editor/public/llvm-artifacts/xyo_browser_ir.wasm
+
       - name: Build
         run: pnpm --filter xyo-editor exec vite build --base=/xyo-editor/
         env:
-          # LLVM/xyo Wasm artifacts are not committed; the site ships with the
-          # default VM and reports the experimental backends as unavailable.
+          # The xyo-cpp worker entry is generated locally; the unified runtime
+          # shipped above is what the editor actually uses.
           XYO_WASM: '0'
 
       - name: Upload Pages artifact

@@ -82,3 +82,23 @@ pnpm exec vite build --base=/xyo-editor/
 
 The public asset URLs (`assets-scratch`, `llvm-artifacts`) go through
 `src/lib/asset-url.ts` for that reason.
+
+### LLVM artifacts on the published site
+
+The experimental backend needs generated WebAssembly (llc, LLD, the unified
+runtime) that is not part of the repository. `pages.yml` downloads the
+`llvm-artifacts-v1` release asset into `packages/editor/public/llvm-artifacts`
+before building, so the deployed site can offer the backend instead of hiding
+it.
+
+Refresh the bundle after rebuilding the toolchain:
+
+```sh
+pnpm --filter xyo-editor run pack:llvm
+tar -czf /tmp/llvm-artifacts.tar.gz -C packages/editor/public llvm-artifacts
+gh release create llvm-artifacts-v2 /tmp/llvm-artifacts.tar.gz \
+  --title "LLVM-in-Wasm artifacts v2" --notes "…"
+```
+
+Then bump the tag in `.github/workflows/pages.yml`. The bundle carries
+`LICENSE-LLVM.txt` and `THIRD-PARTY.txt`; keep them when repacking.
