@@ -4918,7 +4918,13 @@
       })
     })
     resizeObserver = new ResizeObserver(() => {
-      if (workspace) Blockly.svgResize(workspace)
+      if (!workspace) return
+      Blockly.svgResize(workspace)
+      // Blockly can reposition the flyout scrollbar while resizing the host.
+      // Reapply the fixed-width palette layout after Blockly finishes its resize.
+      requestAnimationFrame(() => {
+        if (!editorDestroyed) normalizeToolboxFlyoutWidth()
+      })
     })
     resizeObserver.observe(blocklyHost)
     if (!selectedExternalTabId && selectedTab === 'code' && selectedTarget) loadTargetWorkspace(selectedTarget)

@@ -425,6 +425,37 @@ describe('editor browser conformance', () => {
     expect(layout.visibleBlocklyToolboxCount).toBe(0)
   })
 
+  it('keeps the flyout scrollbar at the palette edge after resizing the code area', async () => {
+    const currentPage = requirePage()
+    await currentPage.setViewportSize({ width: 1280, height: 800 })
+    await currentPage.goto(baseUrl, { waitUntil: 'networkidle' })
+    await currentPage.locator('.blocklyFlyoutScrollbar').first().waitFor({ state: 'attached' })
+
+    const expectScrollbarAtPaletteEdge = async () => {
+      await currentPage.waitForFunction(() => {
+        const flyout = document.querySelector<SVGSVGElement>('.blocklyToolboxFlyout')
+        if (!flyout) return false
+        const paletteRect = flyout.getBoundingClientRect()
+        return [...document.querySelectorAll<SVGElement>('.blocklyFlyoutScrollbar')].some((scrollbar) => {
+          const scrollbarRect = scrollbar.getBoundingClientRect()
+          return scrollbarRect.height > 0 && Math.abs(paletteRect.right - scrollbarRect.right - 3) < 2
+        })
+      })
+    }
+
+    await expectScrollbarAtPaletteEdge()
+    for (const width of ['70%', '90%', '100%']) {
+      await currentPage.getByTestId('blockly-host').evaluate((host, value) => {
+        const flyout = host.querySelector<SVGSVGElement>('.blocklyToolboxFlyout')!
+        const scrollbar = [...host.querySelectorAll<SVGElement>('.blocklyFlyoutScrollbar')]
+          .find((element) => element.getBoundingClientRect().height > 0 && element.getBoundingClientRect().left > flyout.getBoundingClientRect().left)!
+        scrollbar.style.transform = 'translate(10000px, 0px)'
+        host.style.width = value
+      }, width)
+      await expectScrollbarAtPaletteEdge()
+    }
+  })
+
   it('refreshes the variables flyout after creating a variable', async () => {
     const currentPage = requirePage()
     await currentPage.setViewportSize({ width: 1280, height: 800 })
