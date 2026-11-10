@@ -1,6 +1,16 @@
 @import "tailwindcss";
 @source "./**/*.{svelte,ts}";
 
+@layer base {
+  button:enabled {
+    cursor: pointer;
+  }
+
+  button:disabled {
+    cursor: not-allowed;
+  }
+}
+
 html,
 body {
   height: 100%;
