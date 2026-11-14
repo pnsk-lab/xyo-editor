@@ -1,9 +1,13 @@
 import { strFromU8, strToU8, unzipSync, zipSync } from 'fflate'
+import { Parser } from 'htmlparser2'
 import { Cast } from './util/cast'
 import { Color, type HSVObject, type RGBObject } from './util/color'
+import { costumeSlotKeyOf, expectedWriteSeqOf, isCostumeWriteAborted, isSameHostProjectForSync, isSameProjectSlotsForSync, type CostumeSelectionPrecondition, type CostumeSlotIdentity, type CostumeWriteAbortToken, type CostumeWriteExpected, type CostumeWriteReason, type SlotWriteCapture } from './costume-slot-cas'
 
 export { Cast, LIST_ALL, LIST_INVALID, compare, isInt, isWhiteSpace, toBoolean, toListIndex, toNumber, toRgbColorList, toRgbColorObject, toString } from './util/cast'
 export { Color, RGB_BLACK, RGB_WHITE, decimalToHex, decimalToRgb, hexToDecimal, hexToRgb, hsvToRgb, mixRgb, rgbToDecimal, rgbToHex, rgbToHsv, type HSVObject, type RGBObject } from './util/color'
+export type { CostumeSelectionPrecondition, CostumeSlotIdentity, CostumeWriteAbortToken, CostumeWriteExpected, CostumeWriteReason, SlotWriteCapture } from './costume-slot-cas'
+export { costumeSlotKeyOf as costumeSlotKeyOfHelper, expectedWriteSeqOf as expectedWriteSeqOfHelper, isCostumeWriteAborted as isCostumeWriteAbortedHelper, isSameCostumeAsset, isSameHostProjectForSync, isSameProjectSlotsForSync } from './costume-slot-cas'
 
 export type ScratchValue = string | number | boolean
 
@@ -560,6 +564,14 @@ export interface RuntimeSnapshot {
   turboMode: boolean
   compatibilityMode: boolean
   threads: ThreadSnapshot[]
+  /**
+   * Explicit host project generation (monotonic, bumped on every whole-project
+   * replacement). Carried on every snapshot so the worker can distinguish a
+   * reload (new generation → full reset) from a same-generation edit
+   * (preserve execution). Optional for backward compat: snapshots without it
+   * take the legacy preserving path with safe initialization.
+   */
+  projectGeneration?: number
 }
 
 export interface PenLine {
@@ -604,6 +616,7 @@ export interface RendererFacade {
   penStamp?: (target: ScratchTarget) => void
   createThumbnail?: (targetId?: string) => Promise<Blob | Uint8Array>
   clearCachedCostumes?: () => void
+  pruneCostumeImages?: (keepKeys: Set<string> | readonly string[]) => void
   dispose?: () => void
 }
 
@@ -860,6 +873,20 @@ export class ScratchVM {
   private listeners = new Map<string, Set<Listener>>()
   private threads: RuntimeThread[] = []
   private selectedTargetId = 'sprite1'
+  /**
+   * Monotonic selection epoch for the discrete-save guard.
+   *
+   * Bumped only when the *selected* pair
+   * (`selectedTargetId` / selected `currentCostume`) actually changes, plus
+   * on every project replacement. An away-and-back (`A -> B -> A`,
+   * `0 -> 1 -> 0`) therefore leaves a different epoch even when the final
+   * `(targetId,index)` equality holds again. Non-selected targets never bump
+   * it, so parallel-target throughput is unaffected. Renames keep the stable
+   * id, so they never bump the epoch (the selection guard stays green) — but
+   * they do bump the per-slot `writeSeq`, so a stale versioned CAS still
+   * reports `conflict` instead of clobbering the rename.
+   */
+  private selectionEpoch = 0
   private running = false
   private turboMode = false
   private compatibilityMode = false
@@ -869,6 +896,60 @@ export class ScratchVM {
   private svgAdapter?: unknown
   private bitmapAdapter?: unknown
   private assetBytes = new Map<string, Uint8Array>()
+  /**
+   * Minimal per-costume central queue + identity tracking (same-slot
+   * external-write safety, no behavior change for existing callers).
+   *
+   * Every `updateCostume` / `updateCostumeIfMatch` for one stable slot
+   * (`target.id:index`) runs inside a per-slot FIFO, so completion order
+   * equals initiation order for that asset even when `storeAsset` awaits.
+   * Structural mutations (`delete/reorder/duplicate/add`) bump a per-target
+   * structure sequence synchronously; pending writes re-validate it after
+   * their `storeAsset` await and skip rather than writing old bytes onto
+   * shifted artwork. `updateCostumeIfMatch` additionally checks the live
+   * asset identity (`assetId`/`md5ext`) against the caller's expected value
+   * atomically inside the queue, so an editor cancel restore can keep a real
+   * same-slot external write instead of silently deleting it; when the
+   * expected value carries a monotonic `writeSeq` (see
+   * `costume-slot-cas.ts`), metadata-only external writes are detected too,
+   * because every successful slot write — bytes or metadata-only, including
+   * the synchronous `renameCostume` — bumps the version. The `expected`
+   * (hash + version) is verified both before the `storeAsset` await and
+   * after it, immediately before the atomic mutation, so a rename landing
+   * inside the await window is kept too. On conflict the live external write
+   * is kept. Keys use the
+   * stable target id only, never the display name, so same-name targets never
+   * alias. Public signatures of existing methods are unchanged (the expected
+   * version field is optional).
+   *
+   * Project boundary: `loadProject` / `clear` / whole-project replacement
+   * bump `projectGeneration` and drop all queued tails/sequences, so writes
+   * enqueued under an old project never land on the new one — even when the
+   * new project reuses the same target id. Target delete/recreate is covered
+   * by capturing the live target/costume object references at enqueue time:
+   * a recreated target is a different object, so old waiters always skip.
+   * Tail cleanup removes only the last settled tail (identity-checked
+   * against the current map value), so pruning never breaks queue order, and
+   * unknown targets never create tail keys.
+   *
+   * Explicit non-goals: direct plain-object mutation of `project.targets` /
+   * costume objects, and plugins bypassing the VM API, are outside the
+   * protection scope — only writes funneled through the slot queue
+   * participate.
+   */
+  private costumeWriteTails = new Map<string, Promise<void>>()
+  private costumeWriteSeq = new Map<string, number>()
+  private costumeStructureSeq = new Map<string, number>()
+  /** Monotonic project generation bumped on every project replacement. */
+  private projectGeneration = 0
+  /**
+   * Last host generation applied via `applyHostProjectSnapshot`. Tracks the
+   * host epoch separately from the worker's own `projectGeneration` so numeric
+   * divergence from independent load counts never triggers a spurious reset.
+   * `undefined` means no host snapshot with a generation has been applied yet
+   * (safe initialization for backward-compat snapshots lacking generation).
+   */
+  private appliedHostGeneration: number | undefined = undefined
   private ioData = new Map<string, unknown>()
   private pressedKeys = new Set<string>()
   private variableLookupCache = new WeakMap<ScratchTarget, Map<string, string>>()
@@ -1210,6 +1291,12 @@ export class ScratchVM {
   clear(): void {
     this.renderer?.clearCachedCostumes?.()
     this.project = createDefaultProject()
+    // Project replacement always invalidates discrete-save guards (even when
+    // the new project reuses the same target id) via the generation + epoch
+    // bump in `resetCostumeWriteEpoch`; then re-point the selection.
+    this.resetCostumeWriteEpoch()
+    this.timerStart = Date.now()
+    this.runtimeCounter = 0
     this.selectedTargetId = 'sprite1'
     this.origin = this.project.meta.origin ?? null
     this.resetExecutionState({ clearKeyboard: true, clearAnswer: true })
@@ -1249,6 +1336,10 @@ export class ScratchVM {
       this.project = normalizeProject(input)
       this.clearDataLookupCache()
       this.clearReporterCache()
+      // Project replacement: old queued slot writes must never land here.
+      this.resetCostumeWriteEpoch()
+      this.timerStart = Date.now()
+      this.runtimeCounter = 0
       this.origin = this.project.meta.origin ?? null
       const selected = this.project.targets.find((target) => !target.isStage) ?? this.project.targets[0]
       this.selectedTargetId = selected?.id ?? selected?.name ?? 'Stage'
@@ -1294,12 +1385,17 @@ export class ScratchVM {
     })
     if (normalizedTargets.length === 0) return Promise.resolve()
     this.project.targets = wholeProject ? normalizedTargets : [...this.project.targets, ...normalizedTargets.filter((target) => !target.isStage)]
+    if (wholeProject) this.resetCostumeWriteEpoch()
     this.clearDataLookupCache()
     this.project.extensions = [...new Set([...(wholeProject ? [] : this.project.extensions), ...extensions])]
     if (!this.project.targets.some((target) => target.isStage)) this.project.targets.unshift(createStageTarget())
     normalizeLayerOrder(this.project)
     const selected = this.project.targets.find((target) => !target.isStage) ?? this.project.targets[0]
-    this.selectedTargetId = selected?.id ?? selected?.name ?? 'Stage'
+    const nextId = selected?.id ?? selected?.name ?? 'Stage'
+    // Whole-project replacement already bumped generation + epoch via reset;
+    // partial installs must bump only on a real selection change.
+    if (wholeProject) this.selectedTargetId = nextId
+    else this.setSelectedTargetIdStable(nextId)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('WORKSPACE_UPDATE', this.snapshot())
@@ -1316,7 +1412,7 @@ export class ScratchVM {
 
   set editingTarget(target: ScratchTarget | string | null | undefined) {
     if (target === null) {
-      this.selectedTargetId = this.getStage().id ?? this.getStage().name
+      this.setSelectedTargetIdStable(this.getStage().id ?? this.getStage().name)
       this.emit('EDITING_TARGET_CHANGED', null)
       this.emit('TARGETS_UPDATE', this.snapshot())
       this.emit('WORKSPACE_UPDATE', this.snapshot())
@@ -1410,6 +1506,7 @@ export class ScratchVM {
       turboMode: this.turboMode,
       compatibilityMode: this.compatibilityMode,
       threads: this.threads.map((thread) => this.threadSnapshot(thread)),
+      projectGeneration: this.projectGeneration,
     }
   }
 
@@ -1427,6 +1524,7 @@ export class ScratchVM {
       turboMode: this.turboMode,
       compatibilityMode: this.compatibilityMode,
       threads: this.threads.map((thread) => this.threadSnapshot(thread)),
+      projectGeneration: this.projectGeneration,
     }
   }
 
@@ -1435,14 +1533,592 @@ export class ScratchVM {
   }
 
   applyRuntimeSnapshot(snapshot: RuntimeSnapshot, options: { cloneProject?: boolean } = {}): void {
-    this.project = options.cloneProject === false ? snapshot.project : structuredClone(snapshot.project)
-    this.selectedTargetId = snapshot.selectedTargetId
-    this.origin = snapshot.origin
+    // Worker -> host direction: pure runtime-state sync. Same logical
+    // project, preserve the costume write epoch (projectGeneration +
+    // per-slot writeSeq + per-target structureSeq + queued tails). Only
+    // runtime-mutable fields are merged in place so live target/costume
+    // object identities stay stable and in-flight versioned previews are NOT
+    // discarded every frame. Host costume/sound/block assets are always
+    // authoritative and never overwritten by a stale worker snapshot, so an
+    // external metadata-only (same bytes) or same-bytes rewrite is never
+    // missed. Apparent id match alone never counts as the same project (see
+    // `isSameProjectSlotsForSync`).
+    //
+    // `cloneProject: false` (the worker-frame contract) always takes this
+    // runtime-only path. Any other option value means "explicit new project
+    // object": perform a structural replacement with the same epoch boundary
+    // as `commitRuntimeSnapshot` (same slots bump the generation once and
+    // drop the gated tail; true replacement fully resets the epoch) so old
+    // queued writes can never cross the boundary.
+    if (options.cloneProject === false) {
+      const prevSel = this.getSelectionSnapshot()
+      this.mergeRuntimeStateOnly(snapshot.project)
+      if (typeof snapshot.selectedTargetId === 'string') {
+        const hit = this.project.targets.find((t) => t.id === snapshot.selectedTargetId || t.name === snapshot.selectedTargetId)
+        if (hit) this.setSelectedTargetIdStable(hit.id ?? hit.name)
+      }
+      const nextSel = this.getSelectionSnapshot()
+      if (prevSel.targetId !== nextSel.targetId || prevSel.index !== nextSel.index) {
+        // `mergeRuntimeStateOnly` may have moved the selected `currentCostume`
+        // via a worker frame; a real move already bumped via the helper above
+        // when the id changed, otherwise bump here for an index-only move.
+        if (prevSel.targetId === nextSel.targetId && prevSel.index !== nextSel.index) this.bumpSelectionEpoch()
+      }
+      this.origin = snapshot.origin ?? this.origin
+      this.running = snapshot.running
+      this.turboMode = snapshot.turboMode
+      this.compatibilityMode = snapshot.compatibilityMode
+      this.emit('TARGETS_UPDATE', this.snapshot())
+      this.emit('WORKSPACE_UPDATE', this.snapshot())
+      return
+    }
+    const incomingProject = structuredClone(snapshot.project)
+    const sameProject = isSameProjectSlotsForSync(this.project, incomingProject)
+    this.project = incomingProject
+    this.clearDataLookupCache()
+    this.clearReporterCache()
+    if (sameProject) {
+      this.projectGeneration += 1
+      this.selectionEpoch += 1
+      this.costumeWriteTails.clear()
+    } else {
+      this.resetCostumeWriteEpoch()
+    }
+    if (typeof snapshot.selectedTargetId === 'string') {
+      const hit = this.project.targets.find((t) => t.id === snapshot.selectedTargetId || t.name === snapshot.selectedTargetId)
+      if (hit) this.selectedTargetId = hit.id ?? hit.name
+    }
+    this.origin = snapshot.origin ?? this.origin
     this.running = snapshot.running
     this.turboMode = snapshot.turboMode
     this.compatibilityMode = snapshot.compatibilityMode
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('WORKSPACE_UPDATE', this.snapshot())
+  }
+
+  /**
+   * Host -> worker direction: explicit host-authoritative sync with safe
+   * execution preservation.
+   *
+   * Fast path (`isSameHostProjectForSync`): no host-owned structural change.
+   * Only host selection / costume selection / turbo / compatibility are
+   * adopted; ALL live runtime progression (x/y/variables/lists/timer/pen/
+   * threads) is preserved untouched so a stale host snapshot taken before the
+   * latest worker frame can never rewind monotonic state. Selection follows
+   * the host only when it still resolves.
+   *
+   * Structural path (any host edit: executable block change, costume bytes
+   * add/remove/reorder, sound add/remove, target add/remove/reorder, rename,
+   * declaration or monitor/extension change, block geometry excluded): merge
+   * host-authoritative code/assets/metadata IN PLACE while preserving live
+   * execution wherever the program pointers stay valid. Never re-runs green
+   * flag hats (that would duplicate side effects); never synthesizes threads
+   * from `snapshot.threads`. Per-thread validity: a thread survives only when
+   * its target still exists and every referenced block id
+   * (`topBlockId`/`currentBlockId`/loop-stack/call-stack returns) still exists
+   * in the NEW blocks with an unchanged opcode. Otherwise that thread alone is
+   * dropped. Survivors keep their live target object (mutated in place), PC,
+   * stack, waits, and glide. `running` is derived from surviving threads
+   * (`threads.length > 0`), never copied from the stale host snapshot, so a
+   * structural sync can never produce zombie `running:true threads:0`, and a
+   * `stopAll`/fresh-load that kills every thread correctly settles to
+   * `running:false` (callers emit `PROJECT_RUN_STOP` from there when needed).
+   * Timer/pen/audio/edge-hat states are preserved; only the flag/stop paths
+   * drive execution from scratch.
+   */
+  applyHostProjectSnapshot(snapshot: RuntimeSnapshot, options: { cloneProject?: boolean; reset?: boolean } = {}): void {
+    const incomingProject = options.cloneProject === false ? snapshot.project : structuredClone(snapshot.project)
+    const rawGen = (snapshot as unknown as { projectGeneration?: unknown }).projectGeneration
+    const incomingGen = typeof rawGen === 'number' && Number.isInteger(rawGen) ? rawGen : undefined
+    const explicitReset = (options as { reset?: unknown }).reset === true
+    if (explicitReset) {
+      this.hostFullReset(incomingProject, snapshot, incomingGen)
+      return
+    }
+    if (incomingGen !== undefined) {
+      if (this.appliedHostGeneration === undefined) {
+        // Safe initialization for backward-compat: first host snapshot with a
+        // generation records it without forcing a reset.
+        this.appliedHostGeneration = incomingGen
+      } else if (incomingGen !== this.appliedHostGeneration) {
+        this.hostFullReset(incomingProject, snapshot, incomingGen)
+        return
+      }
+    }
+    if (isSameHostProjectForSync(this.project, incomingProject)) {
+      const prevSel = this.getSelectionSnapshot()
+      this.mergeHostFastPathSelectionOnly(incomingProject)
+      if (typeof snapshot.selectedTargetId === 'string') {
+        const hit = this.project.targets.find((t) => t.id === snapshot.selectedTargetId || t.name === snapshot.selectedTargetId)
+        if (hit) this.setSelectedTargetIdStable(hit.id ?? hit.name)
+      }
+      const nextSel = this.getSelectionSnapshot()
+      if (prevSel.targetId === nextSel.targetId && prevSel.index !== nextSel.index) this.bumpSelectionEpoch()
+      this.origin = snapshot.origin ?? this.origin
+      this.turboMode = snapshot.turboMode
+      this.compatibilityMode = snapshot.compatibilityMode
+      this.emit('TARGETS_UPDATE', this.snapshot())
+      this.emit('WORKSPACE_UPDATE', this.snapshot())
+      return
+    }
+    // Same-generation structural edit: distinguish comment-only (no epoch bump,
+    // preserve everything) from code/asset edits (epoch bump for CAS safety
+    // while still preserving valid execution — no hat restart).
+    const commentOnly = this.isCommentOnlyHostDifference(this.project, incomingProject)
+    const wasRunning = this.threads.some((thread) => !thread.done)
+    this.mergeHostStructuralPreservingExecution(incomingProject, snapshot)
+    if (!commentOnly) {
+      // Same-gen code/asset edit: bump the worker epoch so stale queued slot
+      // writes (old generation capture) can never land, without clearing
+      // per-slot writeSeq/structure or dropping valid threads/timer. Full
+      // reloads (new host generation / explicit reset) go through
+      // `hostFullReset` which fully resets the epoch + threads/clones/timer.
+      this.projectGeneration += 1
+      this.costumeWriteTails.clear()
+    }
+    const nowRunning = this.threads.length > 0
+    if (wasRunning && !nowRunning) {
+      this.emit('PROJECT_RUN_STOP', this.snapshot())
+    }
+  }
+
+  /**
+   * True when the host difference is limited to comments (or nothing
+   * host-structural): same targets/order/costumes/sounds/blocks/broadcasts/
+   * declarations/extensions/monitors when comments are ignored. Comment-only
+   * edits never bump the epoch and never restart execution.
+   */
+  private isCommentOnlyHostDifference(current: ScratchProject, incoming: ScratchProject): boolean {
+    const strip = (project: ScratchProject): ScratchProject => ({
+      ...project,
+      targets: (project?.targets ?? []).map((target) => ({ ...target, comments: {} })),
+    })
+    try {
+      return isSameHostProjectForSync(strip(current), strip(incoming))
+    } catch {
+      return false
+    }
+  }
+
+  /**
+   * Explicit project replacement (new host generation or `reset:true`).
+   * Adopts the incoming project verbatim (non-clone targets only), drops all
+   * execution (threads/running), transient clones, and resets the timer, then
+   * fully resets the costume-write epoch so old CAS (even same target id)
+   * is blocked. Never restarts hats; the next greenFlag starts fresh.
+   */
+  private hostFullReset(incomingProject: ScratchProject, snapshot: RuntimeSnapshot, incomingGen: number | undefined): void {
+    const wasRunning = this.threads.some((thread) => !thread.done)
+    // Drop all execution + transient state.
+    this.threads = []
+    this.running = false
+    this.currentThread = undefined
+    this.greaterThanHatState.clear()
+    this.touchingHatState.clear()
+    this.extensionHatState.clear()
+    this.pressedKeys.clear()
+    try {
+      this.postIOData('keyboard', { keys: [], isDown: false, pressed: false })
+    } catch {
+      // best effort
+    }
+    this.promptAnswer = ''
+    this.clearGlows()
+    // Adopt the incoming project verbatim (host-authoritative). Incoming
+    // clones are stale worker-owned copies — never resurrect them.
+    const incomingTargets = (incomingProject?.targets ?? []).filter((t) => t && !t.isClone)
+    // When `cloneProject:false` the caller hands over a fresh snapshot object
+    // (postMessage clone / exportProject clone) so zero-copy adoption is safe.
+    // Otherwise `incomingProject` is already a structuredClone above.
+    this.project.targets = incomingTargets as ScratchTarget[]
+    if (Array.isArray((incomingProject as ScratchProject)?.monitors)) {
+      this.project.monitors = (incomingProject as ScratchProject).monitors as never
+    } else {
+      this.project.monitors = []
+    }
+    if (Array.isArray((incomingProject as ScratchProject)?.extensions)) {
+      this.project.extensions = [...new Set((incomingProject as ScratchProject).extensions.map(String))]
+    }
+    if ((incomingProject as ScratchProject)?.meta !== undefined) {
+      this.project.meta = structuredClone((incomingProject as ScratchProject).meta)
+    }
+    normalizeLayerOrder(this.project)
+    this.clearDataLookupCache()
+    this.clearReporterCache()
+    this.hatCache.clear()
+    // Full epoch reset: old queued tails/sequences can never cross.
+    this.resetCostumeWriteEpoch()
+    // Timer restarts on project reload (sensing_timer origin).
+    this.timerStart = Date.now()
+    this.runtimeCounter = 0
+    // Selection follows host when it still resolves.
+    if (typeof snapshot.selectedTargetId === 'string') {
+      const hit = this.project.targets.find((t) => !t.isClone && (t.id === snapshot.selectedTargetId || t.name === snapshot.selectedTargetId))
+      if (hit?.id) this.selectedTargetId = hit.id
+      else if (hit?.name) this.selectedTargetId = hit.name
+    }
+    if (!this.project.targets.some((t) => !t.isClone && (t.id === this.selectedTargetId || t.name === this.selectedTargetId))) {
+      const selected = this.project.targets.find((target) => !target.isStage && !target.isClone) ?? this.project.targets[0]
+      if (selected?.id) this.selectedTargetId = selected.id
+      else if (selected?.name) this.selectedTargetId = selected.name
+    }
+    this.origin = snapshot.origin ?? this.origin
+    this.turboMode = snapshot.turboMode
+    this.compatibilityMode = snapshot.compatibilityMode
+    if (incomingGen !== undefined) this.appliedHostGeneration = incomingGen
+    else this.appliedHostGeneration = this.projectGeneration
+    this.emit('TARGETS_UPDATE', this.snapshot())
+    this.emit('WORKSPACE_UPDATE', this.snapshot())
+    if (wasRunning) {
+      this.emit('PROJECT_RUN_STOP', this.snapshot())
+    }
+  }
+
+  /**
+   * Fast-path host selection adoption. Same-structure frames never touch live
+   * runtime progression: x/y/variables/lists/pen/timer/threads stay exactly
+   * as the worker advanced them (no rewind from a stale host snapshot taken
+   * before the latest frame). Only the host's *selection intent* is adopted:
+   * `currentCostume` index per target (visual sprite switch) is taken from
+   * the host when in bounds; everything else runtime-mutable is preserved.
+   * Live clones are kept untouched (incoming clones are stale copies).
+   */
+  private mergeHostFastPathSelectionOnly(incomingProject: ScratchProject): void {
+    const incomingById = new Map<string, ScratchTarget>()
+    for (const target of incomingProject?.targets ?? []) {
+      if (target && typeof target.id === 'string' && target.id && !target.isClone) incomingById.set(target.id, target)
+    }
+    for (const live of this.project.targets) {
+      if (live.isClone) continue
+      const incoming = live.id ? incomingById.get(live.id) : undefined
+      if (!incoming) continue
+      const incomingIndex = typeof incoming.currentCostume === 'number' ? incoming.currentCostume : 0
+      if (incomingIndex !== (live.currentCostume ?? 0) && incomingIndex >= 0 && incomingIndex < live.costumes.length) {
+        live.currentCostume = incomingIndex
+      }
+    }
+    if (Array.isArray(incomingProject?.monitors)) {
+      // Adopt monitor *structure* only; live values refresh on snapshot.
+      // Values are runtime-derived, so stale host values must not overwrite.
+      const liveValues = new Map(this.project.monitors.map((monitor) => [monitor.id, monitor.value]))
+      this.project.monitors = structuredClone(incomingProject.monitors)
+      for (const monitor of this.project.monitors) {
+        if (liveValues.has(monitor.id)) monitor.value = liveValues.get(monitor.id)
+      }
+    }
+  }
+
+  /**
+   * Structural host merge preserving live execution. Host owns code/assets/
+   * metadata; worker owns runtime progression. For every non-clone target
+   * present on both sides the live object is mutated in place (so surviving
+   * `thread.target` pointers stay valid): name/costumes/sounds/blocks/
+   * comments/broadcasts/declarations are replaced from the host, while live
+   * runtime values (variable/list contents, x/y/size/direction/pen/timer-
+   * derived state, effects, visibility, speech) are kept. Added targets are
+   * inserted (no hats started); removed targets drop their threads/clones.
+   * Threads whose program pointers no longer resolve (missing block id or
+   * changed opcode for top/current/stack/call returns) are dropped
+   * individually; the rest survive with PC/stacks/waits intact. Clones from
+   * the host snapshot are ignored entirely (worker-owned transient state is
+   * never resurrected or duplicated). Caches invalidated; costume structure
+   * sequences bumped only for targets whose costume slot identity changed;
+   * project generation preserved so unrelated queued slot writes survive.
+   */
+  private mergeHostStructuralPreservingExecution(incomingProject: ScratchProject, snapshot: RuntimeSnapshot): void {
+    const incomingTargets = (incomingProject?.targets ?? []).filter((t) => t && !t.isClone)
+    const incomingById = new Map<string, ScratchTarget>()
+    for (const target of incomingTargets) {
+      if (typeof target.id === 'string' && target.id) incomingById.set(target.id, target)
+    }
+    const liveById = new Map<string, ScratchTarget>()
+    for (const target of this.project.targets) {
+      if (!target.isClone && typeof target.id === 'string' && target.id) liveById.set(target.id, target)
+    }
+
+    // Removed targets: drop threads + clones + costume slot state.
+    for (const [id, live] of liveById) {
+      if (incomingById.has(id)) continue
+      this.threads = this.threads.filter((thread) => thread.target !== live && thread.target.cloneOf !== (live.id ?? live.name))
+      this.project.targets = this.project.targets.filter((candidate) => candidate !== live && candidate.cloneOf !== (live.id ?? live.name))
+      this.pruneCostumeTargetState(id)
+    }
+
+    // Snapshot pre-merge opcodes for PC safety: a script edit that keeps an
+    // id but changes its opcode must not resume the old operation.
+    const oldOpcodeByTargetBlock = new Map<string, Map<string, string>>()
+    for (const [id, live] of liveById) {
+      const opcodes = new Map<string, string>()
+      for (const [blockId, block] of Object.entries(live.blocks ?? {})) {
+        if (block && typeof block.opcode === 'string') opcodes.set(blockId, block.opcode)
+      }
+      oldOpcodeByTargetBlock.set(id, opcodes)
+    }
+
+    // Common targets: in-place host-authoritative merge, preserving runtime.
+    for (const [id, live] of liveById) {
+      const incoming = incomingById.get(id)
+      if (!incoming) continue
+      const prevCostumeIdentity = live.costumes.map((costume) => `${costume.assetId ?? ''}|${costume.md5ext ?? ''}|${costume.dataFormat ?? ''}`).join(';')
+
+      // Declarations merge preserving live *values* (host owns names/flags).
+      const mergedVariables: Record<string, VariableRecord> = {}
+      for (const [varId, record] of Object.entries(incoming.variables ?? {})) {
+        const liveRecord = live.variables[varId]
+        if (liveRecord) {
+          const isCloud = record[2] === true || liveRecord[2] === true
+          mergedVariables[varId] = (isCloud ? [record[0], liveRecord[1], true] : [record[0], liveRecord[1]]) as VariableRecord
+        } else mergedVariables[varId] = structuredClone(record)
+      }
+      live.variables = mergedVariables
+      const mergedLists: Record<string, ListRecord> = {}
+      for (const [listId, record] of Object.entries(incoming.lists ?? {})) {
+        const liveRecord = live.lists[listId]
+        if (liveRecord) mergedLists[listId] = [record[0], [...liveRecord[1]]]
+        else mergedLists[listId] = structuredClone(record)
+      }
+      live.lists = mergedLists
+
+      // Host-authoritative code/assets/metadata (full replace, cloned).
+      live.name = incoming.name
+      live.costumes = structuredClone(incoming.costumes ?? [])
+      live.sounds = structuredClone(incoming.sounds ?? [])
+      live.blocks = structuredClone(incoming.blocks ?? {})
+      live.comments = structuredClone(incoming.comments ?? {})
+      live.broadcasts = structuredClone(incoming.broadcasts ?? {})
+      if (incoming.textToSpeechLanguage !== undefined) live.textToSpeechLanguage = incoming.textToSpeechLanguage
+      // Adopt host costume selection (visual switch) when in bounds.
+      const incomingIndex = typeof incoming.currentCostume === 'number' ? incoming.currentCostume : 0
+      if (incomingIndex >= 0 && incomingIndex < live.costumes.length) live.currentCostume = incomingIndex
+      else if (live.costumes.length > 0) live.currentCostume = Math.min(Math.max(0, live.currentCostume ?? 0), live.costumes.length - 1)
+
+      const nextCostumeIdentity = live.costumes.map((costume) => `${costume.assetId ?? ''}|${costume.md5ext ?? ''}|${costume.dataFormat ?? ''}`).join(';')
+      if (prevCostumeIdentity !== nextCostumeIdentity) {
+        this.costumeStructureSeq.set(id, (this.costumeStructureSeq.get(id) ?? 0) + 1)
+      }
+    }
+
+    // Added targets: insert host version verbatim (no hats started).
+    for (const [id, incoming] of incomingById) {
+      if (liveById.has(id)) continue
+      const clone: ScratchTarget = structuredClone(incoming)
+      this.project.targets.push(clone)
+      liveById.set(id, clone)
+    }
+
+    // Order follows host (layerOrder authoritative for edits; runtime
+    // front/back moves during the raster window re-apply on next frame).
+    const order = new Map(incomingTargets.map((target, index) => [target.id, index]))
+    this.project.targets.sort((a, b) => {
+      if (a.isClone || b.isClone) return 0
+      return (order.get(a.id ?? '') ?? 0) - (order.get(b.id ?? '') ?? 0)
+    })
+    normalizeLayerOrder(this.project)
+
+    // Monitors/extensions/meta follow host (values refresh on snapshot).
+    if (Array.isArray(incomingProject?.monitors)) {
+      const liveValues = new Map(this.project.monitors.map((monitor) => [monitor.id, monitor.value]))
+      this.project.monitors = structuredClone(incomingProject.monitors)
+      for (const monitor of this.project.monitors) {
+        if (liveValues.has(monitor.id)) {
+          const liveValue = liveValues.get(monitor.id)
+          // Keep live-measured values; structure (params/visibility) is host's.
+          if (monitor.opcode === 'data_variable' || monitor.opcode === 'data_listcontents') monitor.value = liveValue
+        }
+      }
+    }
+    if (Array.isArray(incomingProject?.extensions)) this.project.extensions = [...new Set(incomingProject.extensions.map(String))]
+
+    this.clearDataLookupCache()
+    this.clearReporterCache()
+
+    // Per-thread validity against the NEW blocks: keep only threads whose
+    // every program pointer still resolves to the same opcode. Never start
+    // new hats here (greenFlag owns hat fan-out).
+    const blocksByTarget = new Map<ScratchTarget, Record<string, ScratchBlock>>()
+    for (const target of this.project.targets) {
+      if (!target.isClone) blocksByTarget.set(target, target.blocks ?? {})
+    }
+    const threadBlocksValid = (thread: RuntimeThread): boolean => {
+      const targetId = thread.target.id ?? ''
+      const blocks = blocksByTarget.get(thread.target)
+      // Target removed (or replaced object) -> invalid. Live objects were
+      // mutated in place, so identity holds for survivors.
+      if (!blocks) return false
+      const oldOpcodes = oldOpcodeByTargetBlock.get(targetId)
+      const checkId = (blockId: string | null | undefined, oldOpcode?: string): boolean => {
+        if (blockId === null || blockId === undefined) return true
+        const block = (blocks as Record<string, ScratchBlock>)[blockId]
+        if (!block) return false
+        // Same id but different opcode under a live PC (or its stack/return
+        // chain) means the resumed instruction changed semantics -> drop.
+        if (oldOpcode !== undefined && block.opcode !== oldOpcode) return false
+        return true
+      }
+      const opcodeOf = (blockId: string | null | undefined): string | undefined => {
+        if (blockId === null || blockId === undefined) return undefined
+        return oldOpcodes?.get(blockId)
+      }
+      // Top/current must exist with unchanged opcode. Any dangling or
+      // morphed pointer drops that thread; survivors keep exact PC/stacks.
+      // Opcode changes on *other* (non-PC) blocks are safe: future flow
+      // simply uses the new code.
+      const topBlock = thread.topBlockId ? (blocks as Record<string, ScratchBlock>)[thread.topBlockId] : undefined
+      if (thread.topBlockId && !topBlock) return false
+      if (thread.topBlockId && topBlock && oldOpcodes?.has(thread.topBlockId) && topBlock.opcode !== oldOpcodes.get(thread.topBlockId)) return false
+      if (thread.currentBlockId && !(blocks as Record<string, ScratchBlock>)[thread.currentBlockId]) return false
+      if (thread.currentBlockId && !checkId(thread.currentBlockId, opcodeOf(thread.currentBlockId))) return false
+      // Waits/glides also hold program pointers; a removed/morphed block
+      // must not leave a zombie waiter.
+      if (!checkId(thread.waitingBlockId, opcodeOf(thread.waitingBlockId ?? null))) return false
+      if (!checkId(thread.waitingBroadcastBlockId, opcodeOf(thread.waitingBroadcastBlockId ?? null))) return false
+      if (!checkId(thread.waitingSoundBlockId, opcodeOf(thread.waitingSoundBlockId ?? null))) return false
+      if (thread.glide && !checkId(thread.glide.blockId, opcodeOf(thread.glide.blockId))) return false
+      for (const frame of thread.stack ?? []) {
+        if (frame.kind === 'loop') {
+          if (!checkId(frame.blockId, opcodeOf(frame.blockId))) return false
+        } else if (!checkId(frame.returnTo)) return false
+      }
+      for (const callFrame of thread.callStack ?? []) {
+        if (!checkId(callFrame.returnTo)) return false
+      }
+      return true
+    }
+    // Re-point existing clones to the host-updated canonical structures.
+    // Clones share blocks/costumes/sounds/comments/broadcasts references with
+    // their owner; an in-place owner merge leaves clones running stale code
+    // unless re-pointed. Only shared canonical fields are re-pointed — clone
+    // runtime values (x/y/variables/lists/effects/pen/...) are preserved, and
+    // no clone is resurrected or duplicated here.
+    const ownerByKey = new Map<string, ScratchTarget>()
+    for (const target of this.project.targets) {
+      if (target.isClone) continue
+      if (typeof target.id === 'string' && target.id) ownerByKey.set(target.id, target)
+      if (typeof target.name === 'string' && target.name) ownerByKey.set(target.name, target)
+    }
+    for (const clone of this.project.targets) {
+      if (!clone.isClone) continue
+      const ownerId = clone.cloneOf
+      const owner = ownerId ? ownerByKey.get(ownerId) : undefined
+      if (!owner) continue
+      clone.blocks = owner.blocks
+      clone.costumes = owner.costumes
+      clone.sounds = owner.sounds
+      clone.comments = owner.comments
+      clone.broadcasts = owner.broadcasts
+      if (typeof clone.currentCostume === 'number' && clone.costumes.length > 0) {
+        if (clone.currentCostume < 0 || clone.currentCostume >= clone.costumes.length) {
+          clone.currentCostume = Math.min(Math.max(0, clone.currentCostume), clone.costumes.length - 1)
+        }
+      }
+    }
+    // Note: live targets were mutated in place above; opcode safety uses the
+    // pre-merge snapshot captured before the merge (`oldOpcodeByTargetBlock`).
+    this.threads = this.threads.filter((thread) => {
+      if (thread.done) return false
+      // Clones of removed targets were filtered above; clones of surviving
+      // targets stay alive (their blocks were re-pointed above).
+      if (thread.target.isClone) {
+        const ownerId = thread.target.cloneOf
+        const ownerAlive = ownerId ? liveById.has(ownerId) || [...liveById.values()].some((t) => (t.id ?? t.name) === ownerId) : true
+        if (!ownerAlive) return false
+        return true
+      }
+      return threadBlocksValid(thread)
+    })
+    // Prune dead broadcastAndWait (and backdrop-and-wait) child references:
+    // a parent stuck in `broadcastAndWait` on a child dropped by the
+    // structural edit must not wait forever. If all children were dropped,
+    // the parent resumes on its next step (running derived from survivors).
+    {
+      const liveSet = new Set(this.threads)
+      for (const thread of this.threads) {
+        if (thread.waitingFor && thread.waitingFor.length > 0) {
+          const survivors = thread.waitingFor.filter((child) => liveSet.has(child) && !child.done)
+          if (survivors.length === 0) thread.waitingFor = undefined
+          else if (survivors.length !== thread.waitingFor.length) thread.waitingFor = survivors
+        }
+      }
+    }
+    this.running = this.threads.length > 0
+    this.currentThread = undefined
+
+    // Selection follows host when it still resolves (stable-id exact first).
+    if (typeof snapshot.selectedTargetId === 'string') {
+      const hit = this.project.targets.find((t) => !t.isClone && (t.id === snapshot.selectedTargetId || t.name === snapshot.selectedTargetId))
+      if (hit && hit.id) this.setSelectedTargetIdStable(hit.id)
+    }
+    if (!this.project.targets.some((t) => !t.isClone && (t.id === this.selectedTargetId || t.name === this.selectedTargetId))) {
+      const selected = this.project.targets.find((target) => !target.isStage && !target.isClone) ?? this.project.targets[0]
+      if (selected?.id) this.setSelectedTargetIdStable(selected.id)
+    }
+    this.origin = snapshot.origin ?? this.origin
+    this.turboMode = snapshot.turboMode
+    this.compatibilityMode = snapshot.compatibilityMode
+    this.emit('TARGETS_UPDATE', this.snapshot())
+    this.emit('WORKSPACE_UPDATE', this.snapshot())
+  }
+
+  /** Merge only runtime-mutable state from a worker snapshot, preserving assets. */
+  private mergeRuntimeStateOnly(incomingProject: ScratchProject): void {
+    const incomingById = new Map<string, ScratchTarget>()
+    for (const target of incomingProject?.targets ?? []) {
+      if (target && typeof target.id === 'string' && target.id) incomingById.set(target.id, target)
+    }
+    for (const live of this.project.targets) {
+      if (live.isClone) continue
+      const liveId = live.id ?? ''
+      if (!liveId) continue
+      const incoming = incomingById.get(liveId)
+      if (!incoming || incoming.isClone) continue
+      // Runtime-mutable fields only. Assets/code/identity stay host-owned:
+      // costumes, sounds, blocks, comments, broadcasts, name, id, isStage,
+      // textToSpeechLanguage are never overwritten by stale worker data.
+      const runtimeKeys = [
+        'variables',
+        'lists',
+        'currentCostume',
+        'volume',
+        'layerOrder',
+        'tempo',
+        'videoTransparency',
+        'videoState',
+        'visible',
+        'x',
+        'y',
+        'size',
+        'direction',
+        'draggable',
+        'rotationStyle',
+        'effects',
+        'soundEffects',
+        'pen',
+        'penLines',
+        'drawableId',
+        'speechBubble',
+      ] as const
+      for (const key of runtimeKeys) {
+        const value = (incoming as unknown as Record<string, unknown>)[key]
+        if (value !== undefined) {
+          ;(live as unknown as Record<string, unknown>)[key] = structuredClone(value)
+        }
+      }
+    }
+    // Runtime clones (isClone) are worker-owned transient state: mirror them
+    // without touching editable (non-clone) slots, so stage rendering still
+    // shows clones while paint queues stay stable.
+    const incomingCloneIds = new Set<string>()
+    for (const target of incomingProject?.targets ?? []) {
+      if (target?.isClone && typeof target.id === 'string' && target.id) incomingCloneIds.add(target.id)
+    }
+    this.project.targets = [
+      ...this.project.targets.filter((t) => !t.isClone || (t.id && incomingCloneIds.has(t.id))),
+      ...structuredClone((incomingProject?.targets ?? []).filter((t) => t?.isClone && typeof t.id === 'string' && !this.project.targets.some((live) => live.id === t.id))),
+    ]
+    // Monitor values change every frame; extensions/meta stay host-owned.
+    if (Array.isArray(incomingProject?.monitors)) {
+      this.project.monitors = structuredClone(incomingProject.monitors)
+    }
   }
 
   /** Commit a stopped, detached runtime project without resetting editor or execution state. */
@@ -1454,9 +2130,23 @@ export class ScratchVM {
     if (!project.targets.some((target) => target.id === this.selectedTargetId || target.name === this.selectedTargetId)) {
       throw new Error('Cannot commit a runtime snapshot without the selected target')
     }
+    // Same-project commit (identical slot bytes identity): bump the
+    // generation once to discard the in-flight gated preview, but preserve
+    // the monotonic per-slot writeSeq/structure so persistent CAS survives
+    // and the next gesture re-bases without a false external conflict.
+    // A true replacement (slot identity divergence — never id-match alone)
+    // still fully resets the epoch so old-project writes never land.
+    const sameProject = isSameProjectSlotsForSync(this.project, project)
     this.project = project
     this.clearDataLookupCache()
     this.clearReporterCache()
+    if (sameProject) {
+      this.projectGeneration += 1
+      this.selectionEpoch += 1
+      this.costumeWriteTails.clear()
+    } else {
+      this.resetCostumeWriteEpoch()
+    }
     const committed = this.snapshot()
     this.emit('PROJECT_CHANGED', committed)
     this.emit('TARGETS_UPDATE', committed)
@@ -2056,7 +2746,12 @@ export class ScratchVM {
   selectTarget(name: string): void {
     const target = this.getTarget(name)
     if (!target) return
-    this.selectedTargetId = target.id ?? target.name
+    // Stable-id exact: resolve the hit's stable id and only switch when it is
+    // really a different selection (same-name alias never steers here because
+    // `getTarget` first-match aliasing is resolved by the caller via stable id;
+    // a same-id no-op never bumps the epoch, so no false superseded).
+    const nextId = target.id ?? target.name
+    this.setSelectedTargetIdStable(nextId)
     this.emit('EDITING_TARGET_CHANGED', structuredClone(target))
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('WORKSPACE_UPDATE', this.snapshot())
@@ -2080,7 +2775,7 @@ export class ScratchVM {
     }
     const sprite = createSpriteTarget(input, this.project.targets.length)
     this.project.targets.push(sprite)
-    this.selectedTargetId = sprite.id ?? sprite.name
+    this.setSelectedTargetIdStable(sprite.id ?? sprite.name)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('WORKSPACE_UPDATE', this.snapshot())
@@ -2096,7 +2791,7 @@ export class ScratchVM {
     target.name = uniqueSpriteName(this.project, target.name || 'Sprite')
     target.layerOrder = this.project.targets.length
     this.project.targets.push(target)
-    this.selectedTargetId = target.id ?? target.name
+    this.setSelectedTargetIdStable(target.id ?? target.name)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('WORKSPACE_UPDATE', this.snapshot())
@@ -2141,7 +2836,7 @@ export class ScratchVM {
     copy.x = bounded((copy.x ?? 0) + 20, -240, 240)
     copy.y = bounded((copy.y ?? 0) - 20, -180, 180)
     this.project.targets.push(copy)
-    this.selectedTargetId = copy.id ?? copy.name
+    this.setSelectedTargetIdStable(copy.id ?? copy.name)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     return thenableTarget(structuredClone(copy))
@@ -2155,9 +2850,13 @@ export class ScratchVM {
     this.project.targets = this.project.targets.filter((item) => item !== target && item.cloneOf !== (target.id ?? target.name))
     this.threads = this.threads.filter((thread) => thread.target !== target && thread.target.cloneOf !== (target.id ?? target.name))
     this.project.monitors = this.project.monitors.filter((monitor) => monitor.spriteName !== target.name)
+    // Queued writes captured the deleted target object; prune its slot
+    // state so the maps stay bounded. In-flight waiters skip via the
+    // enqueue-time reference check.
+    this.pruneCostumeTargetState(target.id ?? target.name)
     if (deletingSelected || !this.getTarget(this.selectedTargetId)) {
       const selected = this.getSprites()[0] ?? this.getStage()
-      this.selectedTargetId = selected.id ?? selected.name
+      this.setSelectedTargetIdStable(selected.id ?? selected.name)
     }
     this.emit('PROJECT_CHANGED', this.snapshot())
     if (hadPendingPrompt) this.emit('QUESTION', { question: null })
@@ -2180,7 +2879,9 @@ export class ScratchVM {
       if (monitor.spriteName === previousName) monitor.spriteName = cleanName
     }
     this.updateSpriteNameReferences(previousName, cleanName)
-    if (this.selectedTargetId === name || this.selectedTargetId === target.id) this.selectedTargetId = target.id ?? cleanName
+    // Stable-id selection never follows a display-name rename: the id is
+    // unchanged, so the epoch must not bump (no false superseded on rename).
+    if (this.selectedTargetId === name || this.selectedTargetId === target.id) this.setSelectedTargetIdStable(target.id ?? cleanName)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     this.emit('MONITORS_UPDATE', this.snapshot())
@@ -2572,8 +3273,10 @@ export class ScratchVM {
       nextCostume.assetId = stripExtension(targetNameOrMd5ext)
       nextCostume.dataFormat = extensionFromMd5ext(targetNameOrMd5ext) ?? nextCostume.dataFormat
     }
+    const prevIndex = target.currentCostume ?? 0
     target.costumes.push(normalizeCostume(nextCostume, target.costumes.length, target.isStage))
     target.currentCostume = target.costumes.length - 1
+    this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndex)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     return Promise.resolve(target.currentCostume)
@@ -2588,8 +3291,12 @@ export class ScratchVM {
     const costumeIndex = typeof targetNameOrIndex === 'number' ? targetNameOrIndex : index ?? 0
     const costume = target?.costumes[costumeIndex]
     if (!target || !costume) return Promise.resolve(-1)
+    const prevIndex = target.currentCostume ?? 0
     target.costumes.splice(costumeIndex + 1, 0, { ...structuredClone(costume), name: uniqueAssetName(target.costumes.map((item) => item.name), `${costume.name} copy`) })
     target.currentCostume = costumeIndex + 1
+    this.bumpCostumeStructureSeq(target.id ?? target.name)
+    this.pruneCostumeWriteSeqs(target.id ?? target.name)
+    this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndex)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     return Promise.resolve(target.currentCostume)
@@ -2601,47 +3308,522 @@ export class ScratchVM {
     const name = typeof targetNameOrIndex === 'number' ? String(indexOrName) : String(maybeName ?? '')
     const costume = target?.costumes[index]
     if (!costume || !name.trim()) return false
-    costume.name = name.trim()
+    const nextName = name.trim()
+    // Slot-versioned synchronous rename: a real name change bumps the
+    // per-slot `writeSeq` so a stale versioned `updateCostumeIfMatch` (e.g. a
+    // history restore whose patch carries `name`) fails closed instead of
+    // silently deleting the rename — both before its `storeAsset` await and
+    // after it (re-verified immediately before the atomic mutation). Public
+    // shape is unchanged: still sync, same boolean, same events, same slot
+    // FIFO. A same-name no-op stays version-neutral (no false conflict).
+    if (costume.name !== nextName) {
+      costume.name = nextName
+      const slotKey = this.costumeSlotKey(target!.id ?? target!.name, index)
+      this.costumeWriteSeq.set(slotKey, (this.costumeWriteSeq.get(slotKey) ?? 0) + 1)
+    }
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     return true
   }
 
+  private costumeSlotKey(targetId: string, index: number): string {
+    return costumeSlotKeyOf(targetId, index)
+  }
+
+  private getTargetByStableId(id: string): ScratchTarget | undefined {
+    if (!id) return undefined
+    return this.project.targets.find((target) => target.id === id)
+  }
+
+  /** Monotonic project generation (bumped on every project replacement). */
+  getProjectGeneration(): number {
+    return this.projectGeneration
+  }
+
+  /** Monotonic write count for one stable slot (0 when never written). */
+  getCostumeWriteSeq(targetId: string, index: number): number {
+    return this.costumeWriteTails ? (this.costumeWriteSeq.get(this.costumeSlotKey(targetId, index)) ?? 0) : 0
+  }
+
+  /** Per-target structure sequence bumped on every index-shifting mutation. */
+  getCostumeStructureSeq(targetId: string): number {
+    return this.costumeStructureSeq.get(targetId) ?? 0
+  }
+
+  /** Strict id-scoped identity read (never falls back to a same-name asset). */
+  getCostumeIdentity(targetId: string, index: number): CostumeSlotIdentity | undefined {
+    const live = this.getTargetByStableId(targetId)
+    const costume = live?.costumes[index]
+    if (!costume) return undefined
+    return {
+      assetId: costume.assetId,
+      md5ext: costume.md5ext,
+      dataFormat: costume.dataFormat,
+      writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(targetId, index)) ?? 0,
+    }
+  }
+
+  /** Monotonic selection epoch (bumped on real selection changes + reloads). */
+  getSelectionEpoch(): number {
+    return this.selectionEpoch
+  }
+
+  /** Stable selected target id exact (no display-name fallback; '' when none). */
+  getSelectedTargetStableId(): string {
+    try {
+      const selected = this.getSelectedTarget()
+      const id = (selected as { id?: unknown }).id
+      return typeof id === 'string' && id ? id : ''
+    } catch {
+      return ''
+    }
+  }
+
+  /** Atomic selection snapshot for a discrete-save precondition. */
+  getSelectionSnapshot(): { targetId: string; index: number; selectionEpoch: number; projectGeneration: number } {
+    let targetId = ''
+    let index = 0
+    try {
+      const selected = this.getSelectedTarget()
+      const id = (selected as { id?: unknown }).id
+      targetId = typeof id === 'string' && id ? id : ''
+      const current = (selected as { currentCostume?: unknown }).currentCostume
+      index = typeof current === 'number' && Number.isInteger(current) && current >= 0 ? current : 0
+    } catch {
+      // Best-effort only; callers treat '' as mismatch (fail-closed).
+    }
+    return { targetId, index, selectionEpoch: this.selectionEpoch, projectGeneration: this.projectGeneration }
+  }
+
+  private bumpSelectionEpoch(): void {
+    this.selectionEpoch += 1
+  }
+
+  private setSelectedTargetIdStable(nextId: string): boolean {
+    if (!nextId || nextId === this.selectedTargetId) return false
+    this.selectedTargetId = nextId
+    this.bumpSelectionEpoch()
+    return true
+  }
+
+  /** Bump the selection epoch only when the *selected* target's index moved. */
+  private bumpSelectionEpochIfSelectedIndexChanged(target: ScratchTarget | undefined, prevIndex: number): void {
+    if (!target) return
+    let isSelected = false
+    try {
+      const selected = this.getSelectedTarget()
+      isSelected = selected === target || (typeof target.id === 'string' && !!target.id && target.id === selected.id)
+    } catch {
+      isSelected = false
+    }
+    if (!isSelected) return
+    if ((target.currentCostume ?? 0) !== prevIndex) this.bumpSelectionEpoch()
+  }
+
+  /**
+   * True while an explicit discrete-save selection precondition still holds.
+   * Exact stable-id comparison only (never `name`), plus index, project
+   * generation, and monotonic epoch. Any omitted precondition field is not
+   * checked (backward compatibility). `renameCostume` keeps the stable id so
+   * it never fails here; reorder/reload/switch fail via index/generation/epoch.
+   */
+  private selectionPreconditionValid(selection: CostumeSelectionPrecondition | undefined | null): boolean {
+    if (!selection) return true
+    const hasTarget = typeof selection.targetId === 'string' && selection.targetId !== ''
+    const hasIndex = typeof selection.index === 'number' && Number.isInteger(selection.index) && (selection.index as number) >= 0
+    const hasGeneration = typeof selection.projectGeneration === 'number' && Number.isInteger(selection.projectGeneration as number)
+    const hasEpoch = typeof selection.selectionEpoch === 'number' && Number.isInteger(selection.selectionEpoch as number)
+    if (!hasTarget && !hasIndex && !hasGeneration && !hasEpoch) return true
+    if (hasGeneration && (selection.projectGeneration as number) !== this.projectGeneration) return false
+    if (hasEpoch && (selection.selectionEpoch as number) !== this.selectionEpoch) return false
+    let liveId = ''
+    let liveIndex = 0
+    try {
+      const selected = this.getSelectedTarget()
+      const id = (selected as { id?: unknown }).id
+      liveId = typeof id === 'string' && id ? id : ''
+      const current = (selected as { currentCostume?: unknown }).currentCostume
+      liveIndex = typeof current === 'number' && Number.isInteger(current) && (current as number) >= 0 ? (current as number) : 0
+    } catch {
+      return false
+    }
+    if (hasTarget && (selection.targetId as string) !== liveId) return false
+    if (hasIndex && (selection.index as number) !== liveIndex) return false
+    return true
+  }
+
+  private bumpCostumeStructureSeq(targetId: string): void {
+    if (!targetId) return
+    this.costumeStructureSeq.set(targetId, (this.costumeStructureSeq.get(targetId) ?? 0) + 1)
+  }
+
+  /** Drop per-slot write sequences for one target (index spaces shifted). */
+  private pruneCostumeWriteSeqs(targetId: string): void {
+    if (!targetId) return
+    const prefix = `${targetId}:`
+    for (const key of [...this.costumeWriteSeq.keys()]) {
+      if (key.startsWith(prefix)) this.costumeWriteSeq.delete(key)
+    }
+  }
+
+  /** Drop queued tails + sequences for one target (delete path). */
+  private pruneCostumeTargetState(targetId: string): void {
+    if (!targetId) return
+    const prefix = `${targetId}:`
+    for (const key of [...this.costumeWriteTails.keys()]) {
+      if (key.startsWith(prefix)) this.costumeWriteTails.delete(key)
+    }
+    this.pruneCostumeWriteSeqs(targetId)
+    this.costumeStructureSeq.delete(targetId)
+  }
+
+  /** Bump the project generation and drop all queued slot state. */
+  private resetCostumeWriteEpoch(): void {
+    this.projectGeneration += 1
+    this.selectionEpoch += 1
+    this.costumeWriteTails.clear()
+    this.costumeWriteSeq.clear()
+    this.costumeStructureSeq.clear()
+  }
+
+  /** Enqueue-time snapshot re-validated before running and after awaits. */
+  private captureSlotWrite(targetId: string, index: number): SlotWriteCapture {
+    const target = this.getTargetByStableId(targetId)
+    return {
+      generation: this.projectGeneration,
+      target,
+      costume: target?.costumes[index],
+      structure: this.costumeStructureSeq.get(targetId) ?? 0,
+    }
+  }
+
+  private slotCaptureValid(
+    stableId: string,
+    index: number,
+    capture: SlotWriteCapture,
+  ): boolean {
+    if (this.projectGeneration !== capture.generation) return false
+    const live = this.getTargetByStableId(stableId)
+    const captureTarget = capture.target as ScratchTarget | undefined
+    const captureCostume = capture.costume as ScratchCostume | undefined
+    if (captureTarget !== undefined && live !== captureTarget) return false
+    if ((this.costumeStructureSeq.get(stableId) ?? 0) !== capture.structure) return false
+    if (captureCostume !== undefined && live?.costumes[index] !== captureCostume) return false
+    return true
+  }
+
+  /**
+   * Compare one live slot against a versioned CAS `expected`. Returns the live
+   * identity on mismatch, `null` on match (or when `expected` is undefined,
+   * i.e. unconditional). Every provided hash field must match, and — when the
+   * expected version is present — the live per-slot `writeSeq` must equal it,
+   * so a synchronous `renameCostume` (same bytes, bumped version) is visible.
+   * Called both before the `storeAsset` await and after it, immediately
+   * before the atomic mutation, so an external write landing inside the await
+   * window fails closed instead of being clobbered.
+   */
+  private costumeWriteExpectedMismatch(
+    stableId: string,
+    index: number,
+    expected: CostumeWriteExpected | undefined,
+    wantSeq: number | undefined,
+  ): { assetId?: string; md5ext?: string; writeSeq: number } | null {
+    if (expected === undefined) return null
+    const costume = this.getTargetByStableId(stableId)?.costumes[index]
+    const seq = this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0
+    if (!costume) return { assetId: undefined, md5ext: undefined, writeSeq: seq }
+    const wantAsset = expected.assetId ?? undefined
+    const wantMd5 = expected.md5ext ?? undefined
+    // Require every provided hash field to match; same bytes (same identity)
+    // are not a conflict on their own — the version below detects the
+    // metadata-only external write.
+    if (wantAsset !== undefined && costume.assetId !== wantAsset) return { assetId: costume.assetId, md5ext: costume.md5ext, writeSeq: seq }
+    if (wantMd5 !== undefined && costume.md5ext !== wantMd5) return { assetId: costume.assetId, md5ext: costume.md5ext, writeSeq: seq }
+    if (wantSeq !== undefined && seq !== wantSeq) return { assetId: costume.assetId, md5ext: costume.md5ext, writeSeq: seq }
+    return null
+  }
+
+  private enqueueCostumeSlotWrite<T>(targetId: string, index: number, run: (capture: SlotWriteCapture) => Promise<T>): Promise<T> {
+    const key = this.costumeSlotKey(targetId, index)
+    const capture = this.captureSlotWrite(targetId, index)
+    const prev = this.costumeWriteTails.get(key) ?? Promise.resolve()
+    const next = prev.catch(() => undefined).then(() => run(capture))
+    // Tails never reject so one failure never stalls the slot. Cleanup is
+    // identity-checked: only the last settled tail removes the key, so
+    // pruning never breaks the FIFO order of still-queued writes.
+    const tail = next.catch(() => undefined).then(() => undefined)
+    this.costumeWriteTails.set(key, tail)
+    const pruneTail = (): void => {
+      if (this.costumeWriteTails.get(key) === tail) this.costumeWriteTails.delete(key)
+    }
+    void next.then(pruneTail, pruneTail)
+    return next
+  }
+
+  /**
+   * Atomic compare-and-update for one stable slot (editor cancel/preview
+   * path). Stable-id-only route: the target is resolved by stable id alone
+   * (a deleted target or a same-name alias never writes), the live
+   * `assetId`/`md5ext` must equal `expected`, and — when `expected` carries
+   * a monotonic `writeSeq`/`seq`/`version` — the live slot version must equal
+   * it, so metadata-only external writes (same bytes, same identity) are
+   * detected instead of being silently deleted. On any mismatch the live
+   * external write is kept and `{ applied: false }` is returned with the
+   * live identity, without touching bytes/meta/history.
+   * `expected: undefined` means unconditional (same as `updateCostume`).
+   *
+   * The enqueue-time capture (project generation + target/costume references
+   * + structure sequence) is re-validated before running and after the
+   * `storeAsset` await, so project replacement and target delete/recreate
+   * always discard stale queued writes. `dataFormat` follows patch priority
+   * (`patch.dataFormat ?? live format`). The public signature stays
+   * compatible: the version field is optional.
+   *
+   * Explicit discrete-save selection precondition (`selection`, 6th arg):
+   * backward-compatible and only for explicit discrete user commits (click
+   * stamp / rect-oval-line drag commit). Previews, cancel restores, history
+   * Undo/Redo, and external plugin calls omit it and keep legacy behavior.
+   * When present, the VM validates the *actual* VM selection
+   * (`getSelectedTarget()` stable id exact — never a display-name fallback —
+   * plus `currentCostume`) and the monotonic `selectionEpoch` / project
+   * `generation` at three points: synchronously at enqueue, at queue start
+   * (before the CAS), and after the `storeAsset` await immediately before the
+   * atomic mutation. Any mismatch returns
+   * `{ applied: false, reason: 'superseded' }` with the live identity and
+   * touches no bytes/meta/history/status/selection. An away-and-back
+   * (`A -> B -> A`, `0 -> 1 -> 0`) still supersedes via the epoch even when
+   * the final `(targetId,index)` equality holds again; a reload reusing the
+   * same id supersedes via the generation; a reorder that moves the selected
+   * index supersedes via the index (and the structure sequence). `renameCostume`
+   * keeps the stable id and never bumps the epoch, so the selection guard
+   * stays green across a rename — but the rename bumps the slot `writeSeq`,
+   * so a versioned CAS whose `expected` predates the rename fails closed
+   * with `conflict` (live rename kept, no bytes/meta clobber), both before
+   * the `storeAsset` await and after it. A new edit that captures its
+   * `expected` after the rename still applies (no false external conflict).
+   * Same-slot FIFO order, per-target isolation, and `writeSeq` semantics are
+   * unchanged, so parallel targets keep throughput and normal discrete saves
+   * with a current selection still apply (no false conflict).
+   *
+   * Cooperative abort (`abort`, 7th arg, optional): the pending-bitmap
+   * coordinator passes its per-flight abort flag/object here so an
+   * `abortInFlight` that lands inside the `storeAsset` await window prevents
+   * the atomic mutation itself (checked synchronously at enqueue, at queue
+   * start, and after the await immediately before the mutation). Omitted
+   * keeps the legacy behavior unchanged, so the ordinary public write path
+   * (`updateCostume`, plus `updateCostumeIfMatch` without `abort`) stays
+   * compatible.
+   */
+  async updateCostumeIfMatch(
+    targetId: string,
+    index: number,
+    expected: CostumeWriteExpected | undefined,
+    patch: Partial<ScratchCostume>,
+    data?: Uint8Array | ArrayBuffer,
+    selection?: CostumeSelectionPrecondition,
+    abort?: CostumeWriteAbortToken,
+  ): Promise<{ applied: boolean; reason?: CostumeWriteReason; current?: { assetId?: string; md5ext?: string; writeSeq?: number } }> {
+    const stableId = String(targetId ?? '')
+    if (!stableId || !Number.isInteger(index) || index < 0) return { applied: false, reason: selection ? 'superseded' : undefined }
+    // Cooperative abort (helper-owned per-flight flag): a discard/abort that
+    // already landed before enqueue never enters the queue.
+    if (isCostumeWriteAborted(abort)) {
+      const live = this.getTargetByStableId(stableId)?.costumes[index]
+      return live
+        ? { applied: false, reason: 'superseded', current: { assetId: live.assetId, md5ext: live.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+        : { applied: false, reason: 'superseded' }
+    }
+    // No tail key for unknown slots: fail fast without touching the queue.
+    if (!this.getTargetByStableId(stableId)?.costumes[index]) return { applied: false, reason: selection ? 'superseded' : undefined }
+    // Enqueue-time selection guard (explicit discrete commits only): a switch,
+    // reload, or reorder that already landed before enqueue never enters the
+    // queue, so it cannot block the same-slot FIFO behind a doomed write.
+    if (selection && !this.selectionPreconditionValid(selection)) {
+      const live = this.getTargetByStableId(stableId)?.costumes[index]
+      return live
+        ? { applied: false, reason: 'superseded', current: { assetId: live.assetId, md5ext: live.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+        : { applied: false, reason: 'superseded' }
+    }
+    const wantSeq = expectedWriteSeqOf(expected)
+    return this.enqueueCostumeSlotWrite(stableId, index, async (capture) => {
+      // Cooperative abort is checked at queue start and again after the
+      // `storeAsset` await, immediately before the atomic mutation, so an
+      // abort that lands inside the await window prevents the write itself.
+      if (isCostumeWriteAborted(abort)) {
+        const live = this.getTargetByStableId(stableId)?.costumes[index]
+        return live
+          ? { applied: false, reason: 'superseded', current: { assetId: live.assetId, md5ext: live.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+          : { applied: false, reason: 'superseded' }
+      }
+      // Start-of-turn guards: project replacement / target delete+recreate /
+      // structure shift before our turn discards the stale write. The discrete
+      // selection guard is checked first so a target/costume switch that landed
+      // while queued aborts the bytes themselves, not just the post-commit UI.
+      if (selection && !this.selectionPreconditionValid(selection)) {
+        const live = this.getTargetByStableId(stableId)?.costumes[index]
+        return live
+          ? { applied: false, reason: 'superseded', current: { assetId: live.assetId, md5ext: live.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+          : { applied: false, reason: 'superseded' }
+      }
+      if (!this.slotCaptureValid(stableId, index, capture)) {
+        const stale = this.getTargetByStableId(stableId)?.costumes[index]
+        if (!stale) return { applied: false, reason: selection ? 'superseded' : undefined }
+        return {
+          applied: false,
+          reason: selection ? 'superseded' : undefined,
+          current: { assetId: stale.assetId, md5ext: stale.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 },
+        }
+      }
+      const live = this.getTargetByStableId(stableId)
+      const costume = live?.costumes[index]
+      if (!live || !costume) return { applied: false, reason: selection ? 'superseded' : undefined }
+      const preMismatch = this.costumeWriteExpectedMismatch(stableId, index, expected, wantSeq)
+      if (preMismatch) {
+        return { applied: false, reason: 'conflict', current: preMismatch }
+      }
+      const bytes = byteSourceToUint8Array(data)
+      let asset: { assetId: string; md5ext: string } | undefined
+      let dataFormat: string | undefined
+      if (bytes) {
+        dataFormat = patch?.dataFormat ?? costume.dataFormat ?? 'svg'
+        asset = await this.storeAsset(bytes, dataFormat)
+      }
+      // Re-validate after the await: project replacement, target
+      // delete/recreate, an index-shifting mutation, a target/costume
+      // switch (explicit discrete selection precondition), or a synchronous
+      // `renameCostume` (same bytes, bumped version) in between must not
+      // receive old bytes on shifted artwork, on the newly selected asset,
+      // or over the external rename. The selection check runs immediately
+      // before the atomic mutation, so a switch that lands inside the
+      // `storeAsset` window still aborts; the expected re-check below does
+      // the same for version/hash (rename included). The cooperative abort
+      // token is re-checked here too, synchronously before the atomic
+      // mutation, so a helper `abortInFlight` inside the await window
+      // prevents the bytes from landing.
+      if (isCostumeWriteAborted(abort)) {
+        const moved = this.getTargetByStableId(stableId)?.costumes[index]
+        return moved
+          ? { applied: false, reason: 'superseded', current: { assetId: moved.assetId, md5ext: moved.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+          : { applied: false, reason: 'superseded' }
+      }
+      if (selection && !this.selectionPreconditionValid(selection)) {
+        const moved = this.getTargetByStableId(stableId)?.costumes[index]
+        return moved
+          ? { applied: false, reason: 'superseded', current: { assetId: moved.assetId, md5ext: moved.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+          : { applied: false, reason: 'superseded' }
+      }
+      if (!this.slotCaptureValid(stableId, index, capture)) {
+        const moved = this.getTargetByStableId(stableId)?.costumes[index]
+        if (!moved) return { applied: false, reason: selection ? 'superseded' : undefined }
+        return {
+          applied: false,
+          reason: selection ? 'superseded' : undefined,
+          current: { assetId: moved.assetId, md5ext: moved.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 },
+        }
+      }
+      const captureCostume = capture.costume as ScratchCostume | undefined
+      const fresh = this.getTargetByStableId(stableId)?.costumes[index]
+      if (!fresh || (captureCostume !== undefined ? fresh !== captureCostume : fresh !== costume)) {
+        return { applied: false, reason: selection ? 'superseded' : undefined, current: { assetId: costume.assetId, md5ext: costume.md5ext, writeSeq: this.costumeWriteSeq.get(this.costumeSlotKey(stableId, index)) ?? 0 } }
+      }
+      // Await-window CAS re-verification: the same `expected` (hash +
+      // version) checked before the await is checked again here, so a
+      // synchronous `renameCostume` (or any other version-bumping external
+      // write) that landed while `storeAsset` was in flight fails closed
+      // with `conflict` — the live rename is kept, no bytes/meta clobber.
+      const postMismatch = this.costumeWriteExpectedMismatch(stableId, index, expected, wantSeq)
+      if (postMismatch) {
+        return { applied: false, reason: 'conflict', current: postMismatch }
+      }
+      Object.assign(costume, patch ?? {})
+      if (bytes && asset && dataFormat) {
+        costume.assetId = asset.assetId
+        costume.md5ext = asset.md5ext
+        costume.dataFormat = dataFormat
+      }
+      const slotKey = this.costumeSlotKey(stableId, index)
+      const nextSeq = (this.costumeWriteSeq.get(slotKey) ?? 0) + 1
+      this.costumeWriteSeq.set(slotKey, nextSeq)
+      this.emit('PROJECT_CHANGED', this.snapshot())
+      this.emit('TARGETS_UPDATE', this.snapshot())
+      return { applied: true, current: { assetId: costume.assetId, md5ext: costume.md5ext, writeSeq: nextSeq } }
+    })
+  }
+
   async updateCostume(targetName: string, index: number, patch: Partial<ScratchCostume>, data?: Uint8Array | ArrayBuffer): Promise<void>
   async updateCostume(index: number, patch: Partial<ScratchCostume>, data?: Uint8Array | ArrayBuffer): Promise<void>
   async updateCostume(targetNameOrIndex: string | number, indexOrPatch: number | Partial<ScratchCostume>, patchOrData?: Partial<ScratchCostume> | Uint8Array | ArrayBuffer, maybeData?: Uint8Array | ArrayBuffer): Promise<void> {
-    const target = typeof targetNameOrIndex === 'number' ? this.getSelectedTarget() : this.getTarget(targetNameOrIndex)
+    const probe = typeof targetNameOrIndex === 'number' ? this.getSelectedTarget() : this.getTarget(targetNameOrIndex)
     const index = typeof targetNameOrIndex === 'number' ? targetNameOrIndex : Number(indexOrPatch)
     const patch = (typeof targetNameOrIndex === 'number' ? indexOrPatch : patchOrData) as Partial<ScratchCostume> | undefined
     const data = byteSourceToUint8Array(typeof targetNameOrIndex === 'number' ? patchOrData : maybeData)
-    const costume = target?.costumes[index]
-    if (!costume) return
-    Object.assign(costume, patch ?? {})
-    if (data) {
-      const dataFormat = costume.dataFormat ?? patch?.dataFormat ?? 'svg'
-      const asset = await this.storeAsset(data, dataFormat)
-      costume.assetId = asset.assetId
-      costume.md5ext = asset.md5ext
-      costume.dataFormat = dataFormat
-    }
-    this.emit('PROJECT_CHANGED', this.snapshot())
-    this.emit('TARGETS_UPDATE', this.snapshot())
+    const stableId = probe?.id ?? (typeof targetNameOrIndex === 'string' ? String(targetNameOrIndex) : '')
+    if (!probe || !Number.isInteger(index) || index < 0) return
+    // Legacy name-resolution route (explicit path): `probe` may come from a
+    // display-name lookup for existing callers. The write still serializes
+    // per stable slot and re-validates the enqueue-time capture (project
+    // generation + target/costume references + structure sequence) before
+    // running and after `storeAsset`, so a concurrent delete/reorder/reload
+    // never lands old bytes on shifted indices. Name-alias safety: the final
+    // resolve is by stable id only. Unconditional by design — a normal
+    // commit overwrites an external write (callers needing conflict
+    // protection use `updateCostumeIfMatch` with a versioned expected).
+    await this.enqueueCostumeSlotWrite(stableId, index, async (capture) => {
+      if (!this.slotCaptureValid(stableId, index, capture)) return
+      const live = this.getTargetByStableId(stableId) ?? this.getTarget(stableId)
+      const costume = live?.costumes[index]
+      if (!live || !costume) return
+      if ((live.id ?? '') !== stableId && (probe?.id ?? '') !== stableId) {
+        // Resolved via a same-name alias: refuse to steer onto the namesake.
+        const strict = this.getTargetByStableId(stableId)
+        if (!strict || strict.costumes[index] !== costume) return
+      }
+      const keyId = live.id ?? stableId
+      let asset: { assetId: string; md5ext: string } | undefined
+      let dataFormat: string | undefined
+      if (data) {
+        dataFormat = patch?.dataFormat ?? costume.dataFormat ?? 'svg'
+        asset = await this.storeAsset(data, dataFormat)
+      }
+      if (!this.slotCaptureValid(keyId, index, capture)) return
+      const captureCostume = capture.costume as ScratchCostume | undefined
+      const fresh = this.getTargetByStableId(keyId)?.costumes[index] ?? live?.costumes[index]
+      if (!fresh || (captureCostume !== undefined ? fresh !== captureCostume : fresh !== costume)) return
+      Object.assign(costume, patch ?? {})
+      if (data && asset && dataFormat) {
+        costume.assetId = asset.assetId
+        costume.md5ext = asset.md5ext
+        costume.dataFormat = dataFormat
+      }
+      this.costumeWriteSeq.set(this.costumeSlotKey(keyId, index), (this.costumeWriteSeq.get(this.costumeSlotKey(keyId, index)) ?? 0) + 1)
+      this.emit('PROJECT_CHANGED', this.snapshot())
+      this.emit('TARGETS_UPDATE', this.snapshot())
+    })
   }
 
   deleteCostume(targetNameOrIndex: string | number, maybeIndex?: number): (() => void) | null {
     const target = typeof targetNameOrIndex === 'number' ? this.getSelectedTarget() : this.getTarget(targetNameOrIndex)
     const index = typeof targetNameOrIndex === 'number' ? targetNameOrIndex : maybeIndex ?? 0
     if (!target || target.costumes.length <= 1 || !target.costumes[index]) return null
+    const prevIndex = target.currentCostume ?? 0
     const selected = target.costumes[target.currentCostume]
     const [removed] = target.costumes.splice(index, 1)
     const selectedIndex = selected && selected !== removed ? target.costumes.indexOf(selected) : -1
     target.currentCostume = selectedIndex >= 0 ? selectedIndex : bounded(index, 0, target.costumes.length - 1)
+    this.bumpCostumeStructureSeq(target.id ?? target.name)
+    this.pruneCostumeWriteSeqs(target.id ?? target.name)
+    this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndex)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     if (!removed) return null
+    const stableId = target.id ?? target.name
+    const prevIndexForUndo = target.currentCostume ?? 0
     return () => {
       target.costumes.splice(bounded(index, 0, target.costumes.length), 0, structuredClone(removed))
       target.currentCostume = bounded(index, 0, target.costumes.length - 1)
+      this.bumpCostumeStructureSeq(stableId)
+      this.pruneCostumeWriteSeqs(stableId)
+      this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndexForUndo)
       this.emit('PROJECT_CHANGED', this.snapshot())
       this.emit('TARGETS_UPDATE', this.snapshot())
     }
@@ -2650,11 +3832,15 @@ export class ScratchVM {
   reorderCostume(targetName: string, from: number, to: number): boolean {
     const target = this.getTarget(targetName)
     if (!target?.costumes[from]) return false
+    const prevIndex = target.currentCostume ?? 0
     const selected = target.costumes[target.currentCostume]
     const [costume] = target.costumes.splice(from, 1)
     if (!costume) return false
     target.costumes.splice(bounded(Math.floor(to), 0, target.costumes.length), 0, costume)
     target.currentCostume = selected ? Math.max(0, target.costumes.indexOf(selected)) : bounded(target.currentCostume, 0, target.costumes.length - 1)
+    this.bumpCostumeStructureSeq(target.id ?? target.name)
+    this.pruneCostumeWriteSeqs(target.id ?? target.name)
+    this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndex)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
     return true
@@ -2663,7 +3849,9 @@ export class ScratchVM {
   setCurrentCostume(targetName: string, index: number): void {
     const target = this.getTarget(targetName)
     if (!target?.costumes.length) return
+    const prevIndex = target.currentCostume ?? 0
     target.currentCostume = bounded(Math.floor(index), 0, target.costumes.length - 1)
+    this.bumpSelectionEpochIfSelectedIndexChanged(target, prevIndex)
     this.emit('PROJECT_CHANGED', this.snapshot())
     this.emit('TARGETS_UPDATE', this.snapshot())
   }
@@ -5131,6 +6319,20 @@ export function createDefaultProject(): ScratchProject {
   }
 }
 
+/**
+ * Per-instance SVG geometry view. Each `ScratchCanvasRenderer` owns its
+ * authoritative SVG sizes; module-global `svgTextureSizeByKey` /
+ * `svgTextureSizeByImage` remain only as backward-compatible explicit seeds
+ * (`noteSvgTextureSize*`) for code that never touched a renderer instance.
+ * `hasSvgKey` distinguishes "owned unknown" (`getSvgKey() === null`, shadows
+ * the global) from "never cached" (falls back to the global seed).
+ */
+export interface SvgGeometryLookup {
+  hasSvgKey(key: string): boolean
+  getSvgKey(key: string): [number, number] | null | undefined
+  getSvgImage(image: object): [number, number] | undefined
+}
+
 export class ScratchCanvasRenderer implements RendererFacade {
   private canvas?: ScratchCanvasHost
   private context?: ScratchCanvas2DContext
@@ -5159,7 +6361,45 @@ export class ScratchCanvasRenderer implements RendererFacade {
   private skins = new Map<number, { type: string; data?: unknown; size: [number, number]; rotationCenter: [number, number] }>()
   private drawables = new Map<number, { skinId?: number; group?: string; order: number; visible: boolean; position: [number, number]; direction: number; scale: [number, number]; effects: Record<string, number> }>()
   private assetResolver?: (assetId: string, dataFormat?: string) => Promise<Uint8Array | undefined>
-  private costumeImages = new Map<string, { status: 'loading' | 'ready' | 'error'; image?: ScratchCostumeImage; objectUrl?: string }>()
+  private costumeImages = new Map<string, { status: 'loading' | 'ready' | 'error'; image?: ScratchCostumeImage; objectUrl?: string; seq: number }>()
+  /** Monotonic per-key epoch surviving prune/clear so late async results
+   *  can be identified as stale even after the entry was deleted. */
+  private costumeImageEpochs = new Map<string, number>()
+  /**
+   * Owned authoritative SVG geometry (`${md5ext|assetId}:${dataFormat}`).
+   * `[w,h]` = sanitized-bytes size, `null` = explicitly unknown (shadows the
+   * module-global seed so a same-key `cacheCostumeImage` without bytes stays
+   * fail-closed for THIS instance only). Absent = fall back to the global
+   * explicit-seed cache for backward compatibility.
+   */
+  private ownedSvgTextureSizeByKey = new Map<string, [number, number] | null>()
+  /** Owned per-image geometry (same shadowing rules do not apply: keyed by object). */
+  private ownedSvgTextureSizeByImage = new WeakMap<object, [number, number]>()
+
+  /** View for instance-aware helpers (`costumeImageSize`, `targetCostumeBox`, draw). */
+  svgGeometryLookup(): SvgGeometryLookup {
+    return {
+      hasSvgKey: (key) => this.ownedSvgTextureSizeByKey.has(key),
+      getSvgKey: (key) => this.ownedSvgTextureSizeByKey.get(key),
+      getSvgImage: (image) => {
+        try {
+          return this.ownedSvgTextureSizeByImage.get(image)
+        } catch {
+          return undefined
+        }
+      },
+    }
+  }
+
+  private noteOwnedSvgSizeForImage(image: ScratchCostumeImage, size: [number, number] | null): void {
+    if (size != null && !isValidSvgTextureSize(size)) return
+    if (!size) return
+    try {
+      this.ownedSvgTextureSizeByImage.set(image as object, size)
+    } catch {
+      // Ignore non-object images in headless stubs.
+    }
+  }
 
   private createSkin(type: string, data: unknown, rotationCenter: [number, number]): number {
     const id = this.nextSkinId++
@@ -5180,21 +6420,70 @@ export class ScratchCanvasRenderer implements RendererFacade {
     if (this.lastSnapshot) this.requestDraw(this.lastSnapshot)
   }
 
-  cacheCostumeImage(assetId: string, dataFormat: string, image: ScratchCostumeImage): void {
-    this.releaseCostumeImage(this.costumeImages.get(`${assetId}:${dataFormat}`))
-    this.costumeImages.set(`${assetId}:${dataFormat}`, { status: 'ready', image })
+  cacheCostumeImage(assetId: string, dataFormat: string, image: ScratchCostumeImage, svgSize?: [number, number] | null): void {
+    if (!assetId || !dataFormat || !image) return
+    const key = `${assetId}:${dataFormat}`
+    const seq = this.nextCostumeImageSeq(key)
+    this.releaseCostumeImage(this.costumeImages.get(key))
+    this.costumeImages.set(key, { status: 'ready', image, seq })
+    if (dataFormat === 'svg') {
+      if (isValidSvgTextureSize(svgSize)) {
+        // Owned only: never touch the module-global seed so another
+        // renderer/clone holding the same md5 key keeps its own geometry.
+        // PNG keys never touch SVG geometry (scoped by dataFormat above).
+        this.ownedSvgTextureSizeByKey.set(`${assetId}:${dataFormat}`, svgSize)
+        this.noteOwnedSvgSizeForImage(image, svgSize)
+      } else {
+        // Synchronously seeded without bytes (or with invalid/unknown
+        // geometry): shadow any global explicit seed with `null` so THIS
+        // instance stays fail-closed (legacy fallback / natural size)
+        // without destroying geometry other instances still need.
+        // `null` (unknown) and `undefined` (no geometry) both shadow.
+        this.ownedSvgTextureSizeByKey.set(`${assetId}:${dataFormat}`, null)
+      }
+    }
     if (this.lastSnapshot) this.requestDraw(this.lastSnapshot)
+  }
+
+  /** Drop cached images (and OWNED authoritative SVG geometry) not in `keepKeys`. */
+  pruneCostumeImages(keepKeys: Set<string> | readonly string[]): void {
+    const keep = keepKeys instanceof Set ? keepKeys : new Set(keepKeys)
+    for (const key of [...this.costumeImages.keys()]) {
+      if (keep.has(key)) continue
+      this.releaseCostumeImage(this.costumeImages.get(key))
+      this.costumeImages.delete(key)
+      // Owned only: the module-global explicit seed survives so other
+      // renderers sharing the same md5 key are unaffected. Absent owned
+      // entry falls back to that global seed (backward compatible).
+      this.ownedSvgTextureSizeByKey.delete(key)
+    }
   }
 
   clearCachedCostumes(): void {
     this.costumeImages.forEach((entry) => this.releaseCostumeImage(entry))
     this.costumeImages.clear()
+    // Owned only: never `clearSvgTextureCache()` here — disposing/clearing
+    // one renderer must not wipe geometry other instances still need.
+    this.ownedSvgTextureSizeByKey.clear()
   }
 
   private releaseCostumeImage(entry: { image?: ScratchCostumeImage; objectUrl?: string } | undefined): void {
     if (!entry) return
     if (entry.objectUrl && typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(entry.objectUrl)
     if (entry.image && 'close' in entry.image && typeof entry.image.close === 'function') entry.image.close()
+  }
+
+  /** Next monotonic sequence for a key. Never reset on prune/clear so a
+   *  late async result can never equal a newer generation. */
+  private nextCostumeImageSeq(key: string): number {
+    const next = (this.costumeImageEpochs.get(key) ?? 0) + 1
+    this.costumeImageEpochs.set(key, next)
+    return next
+  }
+
+  private isCurrentCostumeLoad(key: string, seq: number): boolean {
+    const current = this.costumeImages.get(key)
+    return !!current && current.seq === seq
   }
 
   setBackgroundColor(red: number, green: number, blue: number): void {
@@ -5252,12 +6541,12 @@ export class ScratchCanvasRenderer implements RendererFacade {
     if (this.gl && this.backContext && this.backCanvas) {
       this.backCanvas.width = this.canvas.width
       this.backCanvas.height = this.canvas.height
-      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines)
+      drawSnapshot(this.backContext, this.backCanvas.width, this.backCanvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines, this.svgGeometryLookup())
       this.presentWebGL()
       return
     }
     if (!this.context) return
-    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines)
+    drawSnapshot(this.context, this.canvas.width, this.canvas.height, snapshot, snapshot.selectedTargetId, (costume, target) => this.resolveCostumeImage(costume, target), directPenLines ? undefined : this.penCanvas, directPenLines, this.svgGeometryLookup())
   }
 
   private prefetchSnapshotCostumes(snapshot: RuntimeSnapshot): void {
@@ -5278,46 +6567,86 @@ export class ScratchCanvasRenderer implements RendererFacade {
     }
     if (cached) return undefined
     if (!this.assetResolver) return undefined
-    this.costumeImages.set(key, { status: 'loading' })
+    const seq = this.nextCostumeImageSeq(key)
+    this.costumeImages.set(key, { status: 'loading', seq })
     this.assetResolver(assetId, dataFormat)
       .then((bytes) => {
+        if (!this.isCurrentCostumeLoad(key, seq)) return
         if (!bytes) {
-          this.costumeImages.set(key, { status: 'error' })
+          if (this.isCurrentCostumeLoad(key, seq)) this.costumeImages.set(key, { status: 'error', seq })
           return
         }
+        let displayBytes = bytes
+        if (dataFormat === 'svg') {
+          // Identify the authoritative root geometry from the SANITIZED
+          // bytes (parser-based, no regex/network/DOM) before display, and
+          // display the sanitized bytes so external URLs/image-set cannot
+          // fetch. UTF-8 survives the sanitize round-trip (covered by tests).
+          // Malformed input sanitizes fail-closed to a 1x1 placeholder.
+          // Owned only: the same revision guard (`isCurrentCostumeLoad`)
+          // protects the owned geometry, so a late async result can never
+          // hijack a newer generation of THIS instance, let alone another
+          // renderer sharing the same md5 key.
+          try {
+            const sanitized = sanitizeSvgByteStream(bytes)
+            const geometry = parseSvgRootGeometryBytes(sanitized)
+            if (this.isCurrentCostumeLoad(key, seq)) this.ownedSvgTextureSizeByKey.set(key, geometry.textureSize)
+            displayBytes = sanitized
+          } catch {
+            if (this.isCurrentCostumeLoad(key, seq)) this.ownedSvgTextureSizeByKey.set(key, null)
+          }
+        }
+        if (!this.isCurrentCostumeLoad(key, seq)) return
         const type = dataFormat === 'svg' ? 'image/svg+xml' : dataFormat === 'jpg' || dataFormat === 'jpeg' ? 'image/jpeg' : 'image/png'
-        const blobBytes = new Uint8Array(bytes.length)
-        blobBytes.set(bytes)
+        const blobBytes = new Uint8Array(displayBytes.length)
+        blobBytes.set(displayBytes)
         const blob = new Blob([blobBytes], { type })
+        const svgSize = dataFormat === 'svg'
+          ? (this.ownedSvgTextureSizeByKey.has(key)
+            ? this.ownedSvgTextureSizeByKey.get(key) ?? null
+            : svgTextureSizeByKey.get(key) ?? null)
+          : null
         if (typeof Image === 'undefined' && typeof createImageBitmap === 'function') {
           createImageBitmap(blob)
             .then((image) => {
-              this.costumeImages.set(key, { status: 'ready', image })
+              if (!this.isCurrentCostumeLoad(key, seq)) {
+                try {
+                  image.close?.()
+                } catch {}
+                return
+              }
+              this.costumeImages.set(key, { status: 'ready', image, seq })
+              if (svgSize) this.noteOwnedSvgSizeForImage(image, svgSize)
               if (this.lastSnapshot) this.requestDraw(this.lastSnapshot)
             })
             .catch(() => {
-              this.costumeImages.set(key, { status: 'error' })
+              if (this.isCurrentCostumeLoad(key, seq)) this.costumeImages.set(key, { status: 'error', seq })
             })
           return
         }
         if (typeof Image === 'undefined' || typeof URL === 'undefined') {
-          this.costumeImages.set(key, { status: 'error' })
+          if (this.isCurrentCostumeLoad(key, seq)) this.costumeImages.set(key, { status: 'error', seq })
           return
         }
         const image = new Image()
         const objectUrl = URL.createObjectURL(blob)
         image.onload = () => {
-          this.costumeImages.set(key, { status: 'ready', image, objectUrl })
+          if (!this.isCurrentCostumeLoad(key, seq)) {
+            if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(objectUrl)
+            return
+          }
+          this.costumeImages.set(key, { status: 'ready', image, objectUrl, seq })
+          if (svgSize) this.noteOwnedSvgSizeForImage(image, svgSize)
           if (this.lastSnapshot) this.requestDraw(this.lastSnapshot)
         }
         image.onerror = () => {
           if (typeof URL !== 'undefined' && typeof URL.revokeObjectURL === 'function') URL.revokeObjectURL(objectUrl)
-          this.costumeImages.set(key, { status: 'error' })
+          if (this.isCurrentCostumeLoad(key, seq)) this.costumeImages.set(key, { status: 'error', seq })
         }
         image.src = objectUrl
       })
       .catch(() => {
-        this.costumeImages.set(key, { status: 'error' })
+        if (this.isCurrentCostumeLoad(key, seq)) this.costumeImages.set(key, { status: 'error', seq })
       })
     return undefined
   }
@@ -5384,7 +6713,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const canvas = this.canvas ?? this.backCanvas
     const layer = this.ensurePenLayer(canvas?.width ?? 480, canvas?.height ?? 360)
     if (!layer) return
-    drawSpriteOnly(layer.context, layer.canvas.width, layer.canvas.height, target, (costume, drawable) => this.resolveCostumeImage(costume, drawable))
+    drawSpriteOnly(layer.context, layer.canvas.width, layer.canvas.height, target, (costume, drawable) => this.resolveCostumeImage(costume, drawable), '', this.svgGeometryLookup())
   }
 
   private flushPenLayer(): void {
@@ -5519,7 +6848,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
       .filter((target) => !candidateIds || candidateIds.includes(target.id ?? target.name) || candidateIds.includes(target.name))
       .sort((a, b) => (b.layerOrder ?? 0) - (a.layerOrder ?? 0))
     for (const sprite of sprites) {
-      if (boundsIntersect(bounds, targetBounds(sprite)) && this.spriteContainsScratchPoint(sprite, x, y)) return sprite.id ?? sprite.name
+      if (boundsIntersect(bounds, targetBounds(sprite, this.svgGeometryLookup())) && this.spriteContainsScratchPoint(sprite, x, y)) return sprite.id ?? sprite.name
     }
     return null
   }
@@ -5527,7 +6856,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
   getBounds(drawableIdOrName: string | number): ScratchBounds | null {
     if (typeof drawableIdOrName === 'number') return this.drawableBounds(drawableIdOrName)
     const target = this.findDrawable(drawableIdOrName)
-    return target ? targetBounds(target) : null
+    return target ? targetBounds(target, this.svgGeometryLookup()) : null
   }
 
   getBoundsForBubble(drawableIdOrName: string | number): ScratchBounds | null {
@@ -5555,12 +6884,12 @@ export class ScratchCanvasRenderer implements RendererFacade {
       return candidates.some(([id]) => boundsIntersect(bounds, this.drawableBounds(id) ?? bounds))
     }
     if (!target || target.visible === false) return false
-    const bounds = targetBounds(target)
+    const bounds = targetBounds(target, this.svgGeometryLookup())
     const candidates = (this.lastSnapshot?.project.targets ?? [])
       .filter((item) => !item.isStage && item.visible !== false && item !== target)
       .filter((item) => !candidateIds || candidateIds.includes(item.id ?? item.name) || candidateIds.includes(item.name))
     return candidates.some((item) => {
-      const otherBounds = targetBounds(item)
+      const otherBounds = targetBounds(item, this.svgGeometryLookup())
       if (!boundsIntersect(bounds, otherBounds)) return false
       if (!this.canPixelHitTest(target) || !this.canPixelHitTest(item)) return true
       return this.spritesPixelTouching(target, item, boundsIntersection(bounds, otherBounds))
@@ -5579,7 +6908,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     }
     const target = this.findDrawable(drawableIdOrName)
     if (!target || target.visible === false) return false
-    return pointInBounds(x, y, targetBounds(target)) && this.spriteContainsScratchPoint(target, x, y)
+    return pointInBounds(x, y, targetBounds(target, this.svgGeometryLookup())) && this.spriteContainsScratchPoint(target, x, y)
   }
 
   drawableTouchingScratchRect(drawableIdOrName: string | number, left: number, top: number, right: number, bottom: number): boolean {
@@ -5590,7 +6919,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const target = this.findDrawable(drawableIdOrName)
     if (!target || target.visible === false) return false
     const rect = normalizeBounds({ left, top, right, bottom })
-    const bounds = targetBounds(target)
+    const bounds = targetBounds(target, this.svgGeometryLookup())
     if (!boundsIntersect(bounds, rect)) return false
     const intersection = boundsIntersection(bounds, rect)
     return denseCollisionSamplePoints(intersection).some((point) => this.spriteContainsScratchPoint(target, point.x, point.y))
@@ -5668,7 +6997,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const context = this.hitTestContext(canvas.width, canvas.height)
     if (!context) return true
     context.clearRect(0, 0, canvas.width, canvas.height)
-    drawSpriteOnly(context, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target))
+    drawSpriteOnly(context, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target), '', this.svgGeometryLookup())
     const point = scratchToCanvasPoint(x, y, canvas.width, canvas.height)
     const sampleX = bounded(Math.floor(point.x), 0, canvas.width - 1)
     const sampleY = bounded(Math.floor(point.y), 0, canvas.height - 1)
@@ -5705,9 +7034,9 @@ export class ScratchCanvasRenderer implements RendererFacade {
     const sceneContext = this.colorHitTestContext(canvas.width, canvas.height)
     if (!spriteContext || !sceneContext) return false
     spriteContext.clearRect(0, 0, canvas.width, canvas.height)
-    drawSpriteOnly(spriteContext, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target))
+    drawSpriteOnly(spriteContext, canvas.width, canvas.height, sprite, (costume, target) => this.resolveCostumeImage(costume, target), '', this.svgGeometryLookup())
     this.drawSnapshotWithoutTarget(sceneContext, sprite)
-    for (const point of denseCollisionSamplePoints(targetBounds(sprite))) {
+    for (const point of denseCollisionSamplePoints(targetBounds(sprite, this.svgGeometryLookup()))) {
       const canvasPoint = scratchToCanvasPoint(point.x, point.y, canvas.width, canvas.height)
       const x = bounded(Math.floor(canvasPoint.x), 0, canvas.width - 1)
       const y = bounded(Math.floor(canvasPoint.y), 0, canvas.height - 1)
@@ -5731,7 +7060,7 @@ export class ScratchCanvasRenderer implements RendererFacade {
     }
     const canvas = this.canvas ?? this.backCanvas
     if (!canvas) return
-    drawSnapshot(context, canvas.width, canvas.height, snapshot, '', (costume, target) => this.resolveCostumeImage(costume, target), this.penCanvas)
+    drawSnapshot(context, canvas.width, canvas.height, snapshot, '', (costume, target) => this.resolveCostumeImage(costume, target), this.penCanvas, undefined, this.svgGeometryLookup())
   }
 
   private hitTestContext(width: number, height: number): ScratchCanvas2DContext | undefined {
@@ -7337,8 +8666,8 @@ function hitRadius(target: ScratchTarget): number {
   return Math.max(10, Math.min(48, (target.size ?? 100) * 0.18))
 }
 
-function targetBounds(target: ScratchTarget): ScratchBounds {
-  const box = targetCostumeBox(target)
+function targetBounds(target: ScratchTarget, lookup?: SvgGeometryLookup): ScratchBounds {
+  const box = targetCostumeBox(target, lookup)
   const scale = (target.size ?? 100) / 100
   const left = box.left * scale
   const right = box.right * scale
@@ -7369,13 +8698,39 @@ function targetBounds(target: ScratchTarget): ScratchBounds {
   })
 }
 
-function targetCostumeBox(target: ScratchTarget): { left: number; right: number; top: number; bottom: number } {
+function targetCostumeBox(target: ScratchTarget, lookup?: SvgGeometryLookup): { left: number; right: number; top: number; bottom: number } {
   const costume = target.costumes[target.currentCostume ?? 0]
   const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
   const centerX = finiteNumberOr(costume?.rotationCenterX, 48)
   const centerY = finiteNumberOr(costume?.rotationCenterY, 48)
-  const width = finiteNumberOr((costume as ScratchCostume & { width?: number } | undefined)?.width, Math.max(96, centerX * 2))
-  const height = finiteNumberOr((costume as ScratchCostume & { height?: number } | undefined)?.height, Math.max(96, centerY * 2))
+  // Authoritative SVG size from sanitized bytes wins over the legacy
+  // center*2 estimate (center is an offset, not a size). Only when no
+  // bytes-derived size is cached do we keep the historical fallback for old
+  // recorded meta (ambiguous when aspect matches; see `costumeImageSize`).
+  // Owned instance geometry wins; absent owned entry falls back to the
+  // module-global explicit seed. Owned `null` shadows the global (fail-closed
+  // for that instance only) so another renderer sharing the same md5 key is
+  // never destroyed by this instance's prune/clear/seed.
+  const cachedSvg = (() => {
+    if (!isSvgCostume(costume)) return undefined
+    const key = svgTextureCacheKey(costume) ?? ''
+    if (!key) return undefined
+    if (lookup) {
+      if (lookup.hasSvgKey(key)) return lookup.getSvgKey(key) ?? undefined
+      return svgTextureSizeByKey.get(key)
+    }
+    return svgTextureSizeByKey.get(key)
+  })()
+  const svgWidth = cachedSvg ? cachedSvg[0] : undefined
+  const svgHeight = cachedSvg ? cachedSvg[1] : undefined
+  const width = finiteNumberOr(
+    (costume as ScratchCostume & { width?: number } | undefined)?.width ?? svgWidth,
+    Math.max(96, centerX * 2),
+  )
+  const height = finiteNumberOr(
+    (costume as ScratchCostume & { height?: number } | undefined)?.height ?? svgHeight,
+    Math.max(96, centerY * 2),
+  )
   return {
     left: -centerX / bitmapResolution,
     right: (width - centerX) / bitmapResolution,
@@ -7759,6 +9114,7 @@ function drawSnapshot(
   resolveCostumeImage: CostumeImageResolver = () => undefined,
   penLayer?: CanvasImageSource,
   pendingPenLines?: PenLine[],
+  lookup?: SvgGeometryLookup,
 ): void {
   context.imageSmoothingEnabled = false
   context.clearRect(0, 0, width, height)
@@ -7768,7 +9124,7 @@ function drawSnapshot(
   const backdrop = stage?.costumes[stage.currentCostume ?? 0]
   const backdropImage = resolveCostumeImage(backdrop, stage)
   if (backdropImage) {
-    drawBackdropImage(context, backdropImage.image, backdropImage.costume, width, height)
+    drawBackdropImage(context, backdropImage.image, backdropImage.costume, width, height, lookup)
   }
   if (!backdropImage) {
     context.strokeStyle = '#e2e8f0'
@@ -7801,7 +9157,7 @@ function drawSnapshot(
     .sort((a, b) => (a.layerOrder ?? 0) - (b.layerOrder ?? 0))
   for (const sprite of sprites) drawPenLines(context, width, height, sprite)
   for (const sprite of sprites.filter((target) => target.visible !== false)) {
-    const { point, radius } = drawSpriteOnly(context, width, height, sprite, resolveCostumeImage, selectedTargetId)
+    const { point, radius } = drawSpriteOnly(context, width, height, sprite, resolveCostumeImage, selectedTargetId, lookup)
     if (sprite.speechBubble?.text) drawSpeechBubble(context, point.x + radius * 0.7, point.y - radius * 1.25, sprite.speechBubble)
   }
 }
@@ -7813,12 +9169,13 @@ function drawSpriteOnly(
   sprite: ScratchTarget,
   resolveCostumeImage: CostumeImageResolver,
   selectedTargetId = '',
+  lookup?: SvgGeometryLookup,
 ): { point: { x: number; y: number }; radius: number } {
   const point = scratchToCanvasPoint(sprite.x ?? 0, sprite.y ?? 0, width, height)
   const radius = Math.max(10, Math.min(48, (sprite.size ?? 100) * 0.18))
   const selected = selectedTargetId === sprite.id || selectedTargetId === sprite.name
   const costume = sprite.costumes[sprite.currentCostume ?? 0]
-  if (!selected && !targetMayTouchStage(sprite)) return { point, radius }
+  if (!selected && !targetMayTouchStage(sprite, lookup)) return { point, radius }
   if (!selected && costumeIsTransparentPlaceholder(costume)) return { point, radius }
   const costumeImage = resolveCostumeImage(costume, sprite)
   if (costumeImage && !selected && costumeImageIsTransparent(costumeImage.image)) return { point, radius }
@@ -7826,20 +9183,20 @@ function drawSpriteOnly(
   context.translate(point.x, point.y)
   applySpriteTransform(context, sprite)
   if (spriteHasGraphicEffects(sprite)) applySpriteEffects(context, sprite)
-  if (costumeImage) drawCostumeImage(context, costumeImage.image, costumeImage.costume, sprite)
+  if (costumeImage) drawCostumeImage(context, costumeImage.image, costumeImage.costume, sprite, lookup)
   else drawFallbackSprite(context, sprite, selected, radius)
-  if (selected) drawSelectionHalo(context, costumeImage?.image, costumeImage?.costume, sprite, radius)
+  if (selected) drawSelectionHalo(context, costumeImage?.image, costumeImage?.costume, sprite, radius, lookup)
   context.restore()
   return { point, radius }
 }
 
-function drawBackdropImage(context: ScratchCanvas2DContext, image: ScratchCostumeImage, costume: ScratchCostume | undefined, width: number, height: number): void {
+function drawBackdropImage(context: ScratchCanvas2DContext, image: ScratchCostumeImage, costume: ScratchCostume | undefined, width: number, height: number, lookup?: SvgGeometryLookup): void {
   const scaleX = width / 480
   const scaleY = height / 360
   const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
   const centerX = Number(costume?.rotationCenterX)
   const centerY = Number(costume?.rotationCenterY)
-  const raster = rasterizedCostumeImage(image, costume)
+  const raster = rasterizedCostumeImage(image, costume, lookup)
   const imageWidth = raster.width
   const imageHeight = raster.height
   const x = Number.isFinite(centerX) ? 240 - centerX / bitmapResolution : 240 - imageWidth / (2 * bitmapResolution)
@@ -7850,14 +9207,14 @@ function drawBackdropImage(context: ScratchCanvas2DContext, image: ScratchCostum
   context.restore()
 }
 
-function drawCostumeImage(context: ScratchCanvas2DContext, image: ScratchCostumeImage, costume: ScratchCostume | undefined, sprite: ScratchTarget): void {
+function drawCostumeImage(context: ScratchCanvas2DContext, image: ScratchCostumeImage, costume: ScratchCostume | undefined, sprite: ScratchTarget, lookup?: SvgGeometryLookup): void {
   context.save()
   const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
   const scale = ((sprite.size ?? 100) / 100) / bitmapResolution
   context.scale(scale, scale)
   const centerX = Number(costume?.rotationCenterX)
   const centerY = Number(costume?.rotationCenterY)
-  const raster = rasterizedCostumeImage(image, costume)
+  const raster = rasterizedCostumeImage(image, costume, lookup)
   const { width, height } = raster
   const x = Number.isFinite(centerX) ? -centerX : -width / 2
   const y = Number.isFinite(centerY) ? -centerY : -height / 2
@@ -7882,7 +9239,7 @@ function drawFallbackSprite(context: ScratchCanvas2DContext, sprite: ScratchTarg
   context.fill()
 }
 
-function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostumeImage | undefined, costume: ScratchCostume | undefined, sprite: ScratchTarget, fallbackRadius: number): void {
+function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostumeImage | undefined, costume: ScratchCostume | undefined, sprite: ScratchTarget, fallbackRadius: number, lookup?: SvgGeometryLookup): void {
   context.save()
   context.filter = 'none'
   context.globalAlpha = 1
@@ -7892,7 +9249,7 @@ function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostum
   if (image) {
     const bitmapResolution = Math.max(1, Number(costume?.bitmapResolution) || 1)
     const scale = ((sprite.size ?? 100) / 100) / bitmapResolution
-    const { width: imageWidth, height: imageHeight } = costumeImageSize(image, costume)
+    const { width: imageWidth, height: imageHeight } = costumeImageSize(image, costume, lookup)
     const centerX = Number.isFinite(Number(costume?.rotationCenterX)) ? Number(costume?.rotationCenterX) : imageWidth / 2
     const centerY = Number.isFinite(Number(costume?.rotationCenterY)) ? Number(costume?.rotationCenterY) : imageHeight / 2
     context.strokeRect(-centerX * scale, -centerY * scale, imageWidth * scale, imageHeight * scale)
@@ -7904,8 +9261,8 @@ function drawSelectionHalo(context: ScratchCanvas2DContext, image: ScratchCostum
   context.restore()
 }
 
-function targetMayTouchStage(target: ScratchTarget): boolean {
-  const bounds = targetBounds(target)
+function targetMayTouchStage(target: ScratchTarget, lookup?: SvgGeometryLookup): boolean {
+  const bounds = targetBounds(target, lookup)
   return bounds.right >= -260 && bounds.left <= 260 && bounds.top >= -200 && bounds.bottom <= 200
 }
 
@@ -7929,8 +9286,88 @@ function costumeIsTransparentPlaceholder(costume: ScratchCostume | undefined): b
 const transparentCostumeImages = new WeakMap<ScratchCostumeImage, boolean>()
 const rasterizedCostumeImages = new WeakMap<ScratchCostumeImage, { image: ScratchCanvasHost; width: number; height: number }>()
 
-function rasterizedCostumeImage(image: ScratchCostumeImage, costume: ScratchCostume | undefined): { image: CanvasImageSource; width: number; height: number } {
-  const { width, height } = costumeImageSize(image, costume)
+/**
+ * Authoritative SVG texture sizes identified from sanitized SVG bytes.
+ * Key matches `costumeImages`: `${md5ext|assetId}:${dataFormat}`.
+ * Populated synchronously in `resolveCostumeImage` from the sanitized bytes
+ * (parser-based `parseSvgRootGeometryBytes`) and via `noteSvgTextureSize`
+ * for synchronously-seeded images (tests/workers). `null` means the bytes
+ * carry no usable size (missing-dims/invalid: upstream `getBBox` path).
+ * Center is never consulted here; it is an offset only.
+ */
+const svgTextureSizeByKey = new Map<string, [number, number] | null>()
+const svgTextureSizeByImage = new WeakMap<object, [number, number]>()
+
+function svgTextureCacheKey(costume: ScratchCostume | undefined): string | null {
+  if (!costume) return null
+  const dataFormat = costume.dataFormat ?? extensionFromMd5ext(costume.md5ext) ?? ''
+  const assetId = costume.md5ext ?? costume.assetId
+  if (!assetId || !dataFormat) return null
+  return `${assetId}:${dataFormat}`
+}
+
+function isSvgCostume(costume: ScratchCostume | undefined): boolean {
+  return costume?.dataFormat === 'svg' || costume?.md5ext?.endsWith('.svg') === true
+}
+
+/**
+ * Record an authoritative SVG texture size for a costume key (e.g. tests
+ * seeding `costumeImages` synchronously from known SVG bytes). Pass `null`
+ * when the bytes carry no usable size. PNG/bitmaps never use this cache.
+ */
+export function noteSvgTextureSize(assetId: string, dataFormat: string, size: [number, number] | null): void {
+  if (!assetId || !dataFormat) return
+  if (dataFormat !== 'svg') return
+  if (size != null && !isValidSvgTextureSize(size)) return
+  svgTextureSizeByKey.set(`${assetId}:${dataFormat}`, size)
+}
+
+/** Record an authoritative size for a synchronously-seeded image object. */
+export function noteSvgTextureSizeForImage(image: ScratchCostumeImage, size: [number, number] | null): void {
+  if (size != null && !isValidSvgTextureSize(size)) return
+  if (size) {
+    try {
+      svgTextureSizeByImage.set(image as object, size)
+    } catch {
+      // Ignore non-object images in headless stubs.
+    }
+  }
+}
+
+function isValidSvgTextureSize(size: unknown): size is [number, number] {
+  if (!Array.isArray(size) || size.length !== 2) return false
+  const [w, h] = size as unknown[]
+  return (
+    typeof w === 'number' &&
+    typeof h === 'number' &&
+    Number.isFinite(w) &&
+    Number.isFinite(h) &&
+    w > 0 &&
+    h > 0 &&
+    w <= 10000 &&
+    h <= 10000
+  )
+}
+
+/** Clear authoritative SVG texture sizes (mirrors `clearCachedCostumes`). */
+export function clearSvgTextureCache(): void {
+  svgTextureSizeByKey.clear()
+}
+
+/**
+ * Convenience for tests/runtime: parse sanitized SVG text and record the
+ * authoritative texture size for a costume key. Returns the recorded size
+ * (`null` when unknown). Never throws, never fetches.
+ */
+export function noteSvgTextureFromText(assetId: string, dataFormat: string, svgText: string): [number, number] | null {
+  if (dataFormat !== 'svg') return null
+  const size = parseSvgRootGeometry(svgText).textureSize
+  noteSvgTextureSize(assetId, dataFormat, size)
+  return size
+}
+
+function rasterizedCostumeImage(image: ScratchCostumeImage, costume: ScratchCostume | undefined, lookup?: SvgGeometryLookup): { image: CanvasImageSource; width: number; height: number } {
+  const { width, height } = costumeImageSize(image, costume, lookup)
   const isSvg = costume?.dataFormat === 'svg' || costume?.md5ext?.endsWith('.svg') === true
   if (!isSvg || width <= 0 || height <= 0 || (typeof document === 'undefined' && typeof OffscreenCanvas === 'undefined')) return { image, width, height }
   const cached = rasterizedCostumeImages.get(image)
@@ -7980,16 +9417,84 @@ function costumeImageIsTransparent(image: ScratchCostumeImage): boolean {
   }
 }
 
-function costumeImageSize(image: ScratchCostumeImage, costume: ScratchCostume | undefined): { width: number; height: number } {
-  let width = costumeImageWidth(image)
-  let height = costumeImageHeight(image)
-  const centerX = Number(costume?.rotationCenterX)
-  const centerY = Number(costume?.rotationCenterY)
-  const isSvg = costume?.dataFormat === 'svg' || costume?.md5ext?.endsWith('.svg')
-  if (isSvg && width === 300 && Number.isFinite(centerX) && centerX > 0) {
-    if (Number.isFinite(centerX) && centerX > 0) width = centerX * 2
-    if (Number.isFinite(centerY) && centerY > 0) height = centerY * 2
+function costumeImageSize(image: ScratchCostumeImage, costume: ScratchCostume | undefined, lookup?: SvgGeometryLookup): { width: number; height: number } {
+  const width = costumeImageWidth(image)
+  const height = costumeImageHeight(image)
+  const isSvg = isSvgCostume(costume)
+  if (isSvg) {
+    // 1) Authoritative: sanitized SVG bytes identified a texture size
+    // (viewBox wins, else absolute width/height). Center and naturalWidth
+    // are ignored here — center is an offset only.
+    // Owned instance geometry wins; absent owned entry falls back to the
+    // module-global explicit seed. Owned `null` shadows the global so a
+    // same-key seed without bytes stays fail-closed for that instance only.
+    const key = svgTextureCacheKey(costume)
+    if (key && lookup) {
+      if (lookup.hasSvgKey(key)) {
+        const owned = lookup.getSvgKey(key)
+        if (owned) return { width: owned[0], height: owned[1] }
+        try {
+          const byImageOwned = lookup.getSvgImage(image as object)
+          if (byImageOwned) return { width: byImageOwned[0], height: byImageOwned[1] }
+        } catch {
+          // Ignore WeakMap key errors from headless stubs.
+        }
+        return svgFallbackSize(width, height, costume)
+      }
+      try {
+        const byImageOwned = lookup.getSvgImage(image as object)
+        if (byImageOwned) return { width: byImageOwned[0], height: byImageOwned[1] }
+      } catch {
+        // Ignore WeakMap key errors from headless stubs.
+      }
+      const knownGlobal = svgTextureSizeByKey.get(key)
+      if (knownGlobal) return { width: knownGlobal[0], height: knownGlobal[1] }
+      try {
+        const byImage = svgTextureSizeByImage.get(image as object)
+        if (byImage) return { width: byImage[0], height: byImage[1] }
+      } catch {
+        // Ignore WeakMap key errors from headless stubs.
+      }
+      return svgFallbackSize(width, height, costume)
+    }
+    const known = key ? svgTextureSizeByKey.get(key) : undefined
+    if (known) return { width: known[0], height: known[1] }
+    try {
+      const byImage = svgTextureSizeByImage.get(image as object)
+      if (byImage) return { width: byImage[0], height: byImage[1] }
+    } catch {
+      // Ignore WeakMap key errors from headless stubs.
+    }
+    return svgFallbackSize(width, height, costume)
   }
+  return { width, height }
+}
+
+function svgFallbackSize(width: number, height: number, costume: ScratchCostume | undefined): { width: number; height: number } {
+    // 2) Limited legacy fallback (deprecated, ambiguous): no bytes were
+    // available for this SVG (e.g. synchronously pre-seeded test images or
+    // old recorded meta without stored bytes). A viewBox-only SVG with no
+    // intrinsic size loads at the replaced-element default (naturalWidth
+    // 300, height scaled from the viewBox aspect); old projects recover the
+    // real size via rotationCenter*2. Guard with an aspect check so an
+    // explicit `width="300"` artwork whose aspect happens to differ keeps
+    // its natural size. When the aspect ALSO matches (explicit 300x150 at
+    // center 75,37.5; explicit 300x300 at center 48,48), bytes are required
+    // to disambiguate — the fallback mis-shrinks there by design. New code
+    // must populate the authoritative cache via resolveCostumeImage (bytes)
+    // or noteSvgTextureSize/noteSvgTextureFromText instead of relying here.
+    const centerX = Number(costume?.rotationCenterX)
+    const centerY = Number(costume?.rotationCenterY)
+    if (width === 300 && Number.isFinite(centerX) && centerX > 0 && Number.isFinite(centerY) && centerY > 0) {
+      const fallbackWidth = centerX * 2
+      const fallbackHeight = centerY * 2
+      if (fallbackWidth > 0 && fallbackHeight > 0 && height > 0) {
+        const naturalAspect = width / height
+        const fallbackAspect = fallbackWidth / fallbackHeight
+        const drift = Math.abs(naturalAspect - fallbackAspect) / Math.max(naturalAspect, fallbackAspect)
+        if (drift < 0.02) return { width: fallbackWidth, height: fallbackHeight }
+      }
+    }
   return { width, height }
 }
 
@@ -8284,20 +9789,622 @@ function normalizeAssetBytes(data: Uint8Array, dataFormat: string): Uint8Array {
   return strToU8(sanitizeSvgText(text))
 }
 
+const SVG_SANITIZE_MAX_CHARS = 2_000_000
+
+const SVG_SANITIZE_PLACEHOLDER = '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
+
+/**
+ * Parser-based SVG allowlist. Element/attribute names are matched
+ * case-insensitively (lowercased) then re-emitted with canonical SVG casing
+ * so `viewBox` / `linearGradient` / `clipPath` survive intact.
+ */
+const SVG_ALLOWED_ELEMENTS: Record<string, string> = {
+  svg: 'svg',
+  g: 'g',
+  defs: 'defs',
+  path: 'path',
+  rect: 'rect',
+  circle: 'circle',
+  ellipse: 'ellipse',
+  line: 'line',
+  polyline: 'polyline',
+  polygon: 'polygon',
+  text: 'text',
+  tspan: 'tspan',
+  textpath: 'textPath',
+  image: 'image',
+  use: 'use',
+  lineargradient: 'linearGradient',
+  radialgradient: 'radialGradient',
+  stop: 'stop',
+  clippath: 'clipPath',
+  mask: 'mask',
+  pattern: 'pattern',
+  symbol: 'symbol',
+  marker: 'marker',
+  title: 'title',
+  desc: 'desc',
+  metadata: 'metadata',
+  a: 'a',
+}
+
+/**
+ * Tags whose whole subtree is dropped (fail closed). Everything else unknown
+ * is unwrapped: the tag itself is dropped but children keep being sanitized,
+ * so benign shapes/text survive while active content cannot smuggle through.
+ */
+const SVG_SKIP_SUBTREE = new Set([
+  'script',
+  'style',
+  'foreignobject',
+  'iframe',
+  'embed',
+  'object',
+  'handler',
+  'listener',
+  'audio',
+  'video',
+  'canvas',
+  'frame',
+  'frameset',
+  'animate',
+  'animatecolor',
+  'animatemotion',
+  'animatetransform',
+  'set',
+  'mpath',
+  'discard',
+  'link',
+  'source',
+  'cursor',
+  'font',
+])
+
+const SVG_ALLOWED_ATTRS: Record<string, string> = {
+  id: 'id',
+  class: 'class',
+  x: 'x',
+  y: 'y',
+  width: 'width',
+  height: 'height',
+  cx: 'cx',
+  cy: 'cy',
+  r: 'r',
+  rx: 'rx',
+  ry: 'ry',
+  x1: 'x1',
+  y1: 'y1',
+  x2: 'x2',
+  y2: 'y2',
+  points: 'points',
+  d: 'd',
+  fill: 'fill',
+  stroke: 'stroke',
+  'stroke-width': 'stroke-width',
+  'stroke-linecap': 'stroke-linecap',
+  'stroke-linejoin': 'stroke-linejoin',
+  'stroke-miterlimit': 'stroke-miterlimit',
+  'stroke-dasharray': 'stroke-dasharray',
+  'stroke-dashoffset': 'stroke-dashoffset',
+  'stroke-opacity': 'stroke-opacity',
+  'fill-rule': 'fill-rule',
+  'fill-opacity': 'fill-opacity',
+  opacity: 'opacity',
+  transform: 'transform',
+  'transform-origin': 'transform-origin',
+  viewbox: 'viewBox',
+  xmlns: 'xmlns',
+  'xmlns:xlink': 'xmlns:xlink',
+  version: 'version',
+  'font-family': 'font-family',
+  'font-size': 'font-size',
+  'font-style': 'font-style',
+  'font-weight': 'font-weight',
+  'font-variant': 'font-variant',
+  'text-anchor': 'text-anchor',
+  direction: 'direction',
+  'dominant-baseline': 'dominant-baseline',
+  'alignment-baseline': 'alignment-baseline',
+  'baseline-shift': 'baseline-shift',
+  'text-decoration': 'text-decoration',
+  'letter-spacing': 'letter-spacing',
+  'word-spacing': 'word-spacing',
+  display: 'display',
+  visibility: 'visibility',
+  'clip-path': 'clip-path',
+  'clip-rule': 'clip-rule',
+  mask: 'mask',
+  filter: 'filter',
+  offset: 'offset',
+  'stop-color': 'stop-color',
+  'stop-opacity': 'stop-opacity',
+  gradientunits: 'gradientUnits',
+  gradienttransform: 'gradientTransform',
+  spreadmethod: 'spreadMethod',
+  patternunits: 'patternUnits',
+  patterncontentunits: 'patternContentUnits',
+  patterntransform: 'patternTransform',
+  preserveaspectratio: 'preserveAspectRatio',
+  dx: 'dx',
+  dy: 'dy',
+  textlength: 'textLength',
+  lengthadjust: 'lengthAdjust',
+  rotate: 'rotate',
+  method: 'method',
+  spacing: 'spacing',
+  startoffset: 'startOffset',
+  'xml:space': 'xml:space',
+  style: 'style',
+  href: 'href',
+  'xlink:href': 'xlink:href',
+}
+
+const SVG_HREF_HOSTS = new Set(['image', 'use', 'a'])
+
+const SVG_ALLOWED_IMAGE_DATA_PREFIXES = [
+  'data:image/png;base64,',
+  'data:image/jpeg;base64,',
+  'data:image/jpg;base64,',
+  'data:image/gif;base64,',
+  'data:image/webp;base64,',
+]
+
+function svgDecodeHtmlEntitiesOnce(value: string): string {
+  return value
+    .replace(/&#x([0-9a-fA-F]{1,6});?/g, (whole, hex: string) => {
+      const code = Number.parseInt(hex, 16)
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return '�'
+      try {
+        return String.fromCodePoint(code)
+      } catch {
+        return '�'
+      }
+    })
+    .replace(/&#(\d{1,7});?/g, (whole, dec: string) => {
+      const code = Number.parseInt(dec, 10)
+      if (!Number.isFinite(code) || code <= 0 || code > 0x10ffff) return '�'
+      try {
+        return String.fromCodePoint(code)
+      } catch {
+        return '�'
+      }
+    })
+    .replace(/&(lt|gt|amp|quot|apos|colon|tab|newline);/gi, (whole, name: string) => {
+      const table: Record<string, string> = {
+        lt: '<',
+        gt: '>',
+        amp: '&',
+        quot: '"',
+        apos: "'",
+        colon: ':',
+        tab: '\t',
+        newline: '\n',
+      }
+      return table[name.toLowerCase()] ?? whole
+    })
+}
+
+function svgDecodeCssEscapesOnce(value: string): string {
+  const hexDecoded = value.replace(/\\([0-9a-fA-F]{1,6})(?:\r\n|[\r\n\f ])?/g, (whole, hex: string) => {
+    const code = Number.parseInt(hex, 16)
+    if (!Number.isFinite(code) || code === 0 || code > 0x10ffff) return '�'
+    try {
+      return String.fromCodePoint(code)
+    } catch {
+      return '�'
+    }
+  })
+  return hexDecoded
+    .replace(/\\\r\n/g, '')
+    .replace(/\\([\r\n\f])/g, '')
+    .replace(/\\([\s\S])/g, (whole, ch: string) => ch)
+}
+
+function svgDecodeAttrValue(value: string): string {
+  return svgDecodeCssEscapesOnce(svgDecodeHtmlEntitiesOnce(svgDecodeHtmlEntitiesOnce(value)))
+}
+
+function svgIsLocalFragmentTarget(target: string): boolean {
+  if (!target.startsWith('#') || target.length < 2) return false
+  if (/[\x00-\x20"'`<>()\\]/.test(target)) return false
+  if (target.includes('://')) return false
+  return /^#[^"'`<>()\\]*$/.test(target)
+}
+
+function svgIsAllowedDataTarget(target: string): boolean {
+  const compact = target.trim().toLowerCase()
+  return SVG_ALLOWED_IMAGE_DATA_PREFIXES.some((prefix) => compact.startsWith(prefix))
+}
+
+function svgContainsExternalUrl(rawValue: string): boolean {
+  const decoded = svgDecodeAttrValue(rawValue)
+  const withoutComments = decoded.replace(/\/\*[\s\S]*?\*\//g, ' ')
+  const opener = /url\s*\(/gi
+  let match: RegExpExecArray | null
+  while ((match = opener.exec(withoutComments)) !== null) {
+    let i = match.index + match[0].length
+    const n = withoutComments.length
+    while (i < n && /\s/.test(withoutComments[i]!)) i += 1
+    let quote = ''
+    if (withoutComments[i] === '"' || withoutComments[i] === "'") {
+      quote = withoutComments[i]!
+      i += 1
+    }
+    let inner = ''
+    let closed = false
+    if (quote !== '') {
+      const endQuote = withoutComments.indexOf(quote, i)
+      if (endQuote === -1) return true
+      inner = withoutComments.slice(i, endQuote)
+      let j = endQuote + 1
+      while (j < n && /\s/.test(withoutComments[j]!)) j += 1
+      if (withoutComments[j] !== ')') return true
+      opener.lastIndex = j + 1
+      closed = true
+    } else {
+      const endParen = withoutComments.indexOf(')', i)
+      if (endParen === -1) return true
+      inner = withoutComments.slice(i, endParen)
+      opener.lastIndex = endParen + 1
+      closed = true
+    }
+    if (!closed) return true
+    if (inner.includes('(')) return true
+    let target = inner.trim()
+    if (
+      (target.startsWith('"') && target.endsWith('"') && target.length >= 2) ||
+      (target.startsWith("'") && target.endsWith("'") && target.length >= 2)
+    ) {
+      target = target.slice(1, -1).trim()
+    }
+    if (target === '') return true
+    if (target.startsWith('#')) {
+      if (!svgIsLocalFragmentTarget(target)) return true
+      continue
+    }
+    if (target.trim().toLowerCase().startsWith('data:')) {
+      if (!svgIsAllowedDataTarget(target)) return true
+      continue
+    }
+    return true
+  }
+  return false
+}
+
+function svgContainsExternalCssImageFunction(rawValue: string): boolean {
+  const decoded = svgDecodeAttrValue(rawValue)
+  const withoutComments = decoded.replace(/\/\*[\s\S]*?\*\//g, ' ')
+  const probe = withoutComments.toLowerCase()
+  return (
+    /(^|[^a-z0-9_-])(-webkit-)?image-set\s*\(/.test(probe) ||
+    /(^|[^a-z0-9_-])(-webkit-)?image\s*\(/.test(probe) ||
+    /(^|[^a-z0-9_-])(-webkit-)?cross-fade\s*\(/.test(probe) ||
+    /(^|[^a-z0-9_-])var\s*\(/.test(probe)
+  )
+}
+
+function svgContainsDangerousCss(rawValue: string): boolean {
+  const decoded = svgDecodeAttrValue(rawValue)
+  const compact = decoded.replace(/[\x00-\x20]+/g, '').toLowerCase()
+  return (
+    compact.includes('javascript:') ||
+    compact.includes('vbscript:') ||
+    compact.includes('data:text/html') ||
+    compact.includes('data:image/svg') ||
+    compact.includes('expression(') ||
+    compact.includes('-moz-binding') ||
+    compact.includes('behavior') ||
+    compact.includes('@import')
+  )
+}
+
+function svgIsAllowedHref(raw: string | null): boolean {
+  if (raw === null) return true
+  const decoded = svgDecodeAttrValue(raw)
+  if (/\/\*/.test(decoded)) return false
+  const value = decoded.trim()
+  if (value === '') return true
+  if (value.startsWith('#')) return svgIsLocalFragmentTarget(value)
+  const compact = value.toLowerCase().replace(/[\x00-\x20]+/g, '')
+  if (
+    compact.startsWith('javascript:') ||
+    compact.startsWith('vbscript:') ||
+    compact.startsWith('data:text/html') ||
+    compact.startsWith('data:image/svg')
+  ) {
+    return false
+  }
+  if (compact.startsWith('data:')) {
+    return SVG_ALLOWED_IMAGE_DATA_PREFIXES.some((prefix) => compact.startsWith(prefix))
+  }
+  return false
+}
+
+function svgLooksLikeEventHandler(name: string): boolean {
+  const stripped = name.toLowerCase().replace(/^[^a-z0-9]+/, '')
+  return stripped.startsWith('on')
+}
+
+function svgEscapeAttr(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+}
+
+function svgEscapeText(value: string): string {
+  return value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+/**
+ * Mature-parser SVG sanitizer (synchronous, DOM-free).
+ *
+ * Security boundary: every SVG ingress (costumeUpload / storeAsset via
+ * updateCostume / sb3-archive load) funnels through `sanitizeSvgText`, and the
+ * result is what gets persisted and exported. Tokenizing is delegated to
+ * htmlparser2 (the same mature parser family that powers `sanitize-html` /
+ * cheerio) in XML mode instead of hand-rolled regex, so the classic regex
+ * bypasses — "/"-before-attribute, unquoted values, entity-encoded schemes,
+ * self-closing / unclosed tags, `<style>` / style-attribute URLs — are parsed
+ * structurally and then filtered by a strict allowlist. Unknown elements are
+ * unwrapped (fail closed), dangerous subtrees are dropped wholesale, and any
+ * ambiguous URL/CSS value drops its attribute.
+ *
+ * Library choice note: `sanitize-html` itself was evaluated but is
+ * HTML-oriented (tag lowercasing breaks case-sensitive SVG names like
+ * `linearGradient`/`clipPath`, and it pulls a CSS pipeline unnecessary for
+ * costumes). Using its underlying mature tokenizer (htmlparser2) directly
+ * with an SVG-specific allowlist preserves embedded PNG / internal `#`
+ * refs / gradients / text while staying synchronous in Node / Bun /
+ * browsers / Workers with no DOM globals and no regex-only security claim.
+ */
 export function sanitizeSvgText(text: string): string {
-  let output = text
-  output = output.replace(/<script[\s\S]*?<\/script>/gi, '')
-  output = output.replace(/<foreignObject[\s\S]*?<\/foreignObject>/gi, '')
-  output = output.replace(/\son[a-z]+\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
-  output = output.replace(/\s(?:href|xlink:href)\s*=\s*(['"])\s*(?:javascript:|data:text\/html)[\s\S]*?\1/gi, '')
-  output = output.replace(/@import[^;]+;/gi, '')
-  if (!/<svg[\s>]/i.test(output)) return '<svg xmlns="http://www.w3.org/2000/svg" width="1" height="1"></svg>'
-  if (!/xmlns=/.test(output)) output = output.replace(/<svg/i, '<svg xmlns="http://www.w3.org/2000/svg"')
-  return output
+  if (typeof text !== 'string') return SVG_SANITIZE_PLACEHOLDER
+  if (text.length === 0 || text.length > SVG_SANITIZE_MAX_CHARS) return SVG_SANITIZE_PLACEHOLDER
+  try {
+    let out = ''
+    // Track whether each open element received any serialized content so empty
+    // elements can round-trip as self-closing (`<path/>`) instead of being
+    // expanded (`<path></path>`). Expansion would rewrite every safe costume on
+    // archive import and break assetId/byte identity; collapsing preserves it
+    // while staying semantically identical XML. The root <svg> is exempt so the
+    // fail-closed placeholder keeps its historical expanded form.
+    const stack: Array<{ lowerName: string; canonical: string; hasContent: boolean }> = []
+    let skipDepth = 0
+    let seenSvg = false
+
+    const parser = new Parser(
+      {
+        onopentag(name: string, attribs: Record<string, string>) {
+          const lowerName = name.toLowerCase()
+          if (skipDepth > 0) {
+            if (SVG_SKIP_SUBTREE.has(lowerName)) skipDepth += 1
+            return
+          }
+          if (SVG_SKIP_SUBTREE.has(lowerName)) {
+            skipDepth += 1
+            return
+          }
+          const canonical = SVG_ALLOWED_ELEMENTS[lowerName]
+          if (!canonical) return
+          let attrs = ''
+          for (const [rawName, rawValue] of Object.entries(attribs)) {
+            if (svgLooksLikeEventHandler(rawName)) continue
+            const lowerAttr = rawName.toLowerCase()
+            const canonicalAttr = SVG_ALLOWED_ATTRS[lowerAttr]
+            if (!canonicalAttr) continue
+            const value = rawValue ?? ''
+            if (canonicalAttr === 'direction') {
+              // RTL text pins its right edge with text-anchor="start"
+              // direction="rtl" (inline-start == right edge under RTL). Allow
+              // only the safe CSS keywords fail-closed (case/whitespace
+              // normalized); anything else drops the attribute so LTR fallback
+              // applies and no smuggled payload survives. Matches the editor
+              // DOMPurify display path which keeps rtl/ltr.
+              const normalized = value.trim().toLowerCase()
+              if (normalized !== 'ltr' && normalized !== 'rtl' && normalized !== 'inherit') continue
+              attrs += ` ${canonicalAttr}="${svgEscapeAttr(normalized)}"`
+              continue
+            } else if (canonicalAttr === 'href' || canonicalAttr === 'xlink:href') {
+              if (!SVG_HREF_HOSTS.has(lowerName)) continue
+              if (!svgIsAllowedHref(value)) continue
+            } else if (canonicalAttr === 'style') {
+              if (svgContainsExternalUrl(value) || svgContainsExternalCssImageFunction(value) || svgContainsDangerousCss(value)) continue
+            } else if (svgContainsExternalUrl(value) || svgContainsExternalCssImageFunction(value) || svgContainsDangerousCss(value)) {
+              continue
+            }
+            attrs += ` ${canonicalAttr}="${svgEscapeAttr(value)}"`
+          }
+          if (canonical === 'svg') {
+            seenSvg = true
+            if (!/(?:^|\s)xmlns\s*=/i.test(attrs)) attrs = ` xmlns="http://www.w3.org/2000/svg"${attrs}`
+          }
+          if (stack.length > 0) stack[stack.length - 1]!.hasContent = true
+          out += `<${canonical}${attrs}>`
+          stack.push({ lowerName, canonical, hasContent: false })
+        },
+        ontext(data: string) {
+          if (skipDepth > 0 || data === '') return
+          if (stack.length > 0) stack[stack.length - 1]!.hasContent = true
+          out += svgEscapeText(data)
+        },
+        oncomment() {},
+        onprocessinginstruction() {},
+        onclosetag(name: string) {
+          const lowerName = name.toLowerCase()
+          if (skipDepth > 0) {
+            if (SVG_SKIP_SUBTREE.has(lowerName)) skipDepth = Math.max(0, skipDepth - 1)
+            return
+          }
+          if (stack.length > 0 && stack[stack.length - 1]!.lowerName === lowerName) {
+            const frame = stack.pop()!
+            if (!frame.hasContent && frame.canonical !== 'svg') {
+              out = `${out.slice(0, -1)}/>`
+            } else {
+              out += `</${frame.canonical}>`
+            }
+          }
+        },
+      },
+      { xmlMode: true, decodeEntities: true, lowerCaseTags: false, lowerCaseAttributeNames: false },
+    )
+    parser.write(text)
+    parser.end()
+
+    while (stack.length > 0) {
+      const frame = stack.pop()!
+      if (!frame.hasContent && frame.canonical !== 'svg') {
+        out = `${out.slice(0, -1)}/>`
+      } else {
+        out += `</${frame.canonical}>`
+      }
+    }
+    if (!seenSvg) return SVG_SANITIZE_PLACEHOLDER
+    return out
+  } catch {
+    return SVG_SANITIZE_PLACEHOLDER
+  }
 }
 
 export function sanitizeSvgByteStream(rawData: Uint8Array): Uint8Array {
   return strToU8(sanitizeSvgText(new TextDecoder().decode(rawData)))
+}
+
+/**
+ * SVG root geometry identified from (sanitized) SVG bytes/text with the
+ * mature htmlparser2 tokenizer — never regex-only, never network/DOM.
+ *
+ * Scratch renderer meaning (scratch-svg-renderer `SVGSkin.setSVG`):
+ * - texture size comes from the root `viewBox` width/height when a valid
+ *   viewBox exists, regardless of `width`/`height` attributes;
+ * - otherwise from absolute `width` + `height` (unitless or `px`);
+ * - otherwise unknown (upstream measures content `getBBox`, which needs
+ *   layout and cannot be recovered from bytes alone).
+ * `rotationCenter` is an offset only and is never used for size estimation
+ * here. Percent (`%`), CSS units (`em`/`pt`/…), `style="width:…"` and
+ * single-sided/malformed values are NOT absolute and yield `textureSize`
+ * `null` unless a valid viewBox provides the size (CSS layout context is
+ * unavailable headless; see incompatibility note in `costumeImageSize`).
+ * `viewBox` origin (`x`,`y`, possibly negative) is reported as `viewOrigin`
+ * but does not affect the size.
+ */
+export type SvgRootKind = 'explicit-absolute' | 'percent' | 'viewBox-only' | 'missing-dims' | 'invalid'
+
+export interface SvgRootGeometry {
+  widthAttr: string | null
+  heightAttr: string | null
+  viewBox: [number, number, number, number] | null
+  kind: SvgRootKind
+  /** Upstream-correct texture size, or `null` when bytes alone are unknown. */
+  textureSize: [number, number] | null
+  viewOrigin: [number, number]
+}
+
+const SVG_GEOMETRY_MAX_CHARS = 2_000_000
+
+function svgGeometryAbsoluteLength(value: string | null): number | null {
+  if (value == null) return null
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return null
+  const match = /^([-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?)\s*(px)?$/i.exec(trimmed)
+  if (!match) return null
+  const n = Number(match[1])
+  return Number.isFinite(n) && n > 0 ? n : null
+}
+
+function svgGeometryViewBox(value: string | null): [number, number, number, number] | null {
+  if (value == null) return null
+  const parts = value
+    .trim()
+    .split(/[\s,]+/)
+    .filter((part) => part.length > 0)
+    .map(Number)
+  if (parts.length !== 4 || !parts.every((n) => Number.isFinite(n))) return null
+  const [x, y, w, h] = parts as [number, number, number, number]
+  if (!Number.isFinite(x) || !Number.isFinite(y)) return null
+  if (!(w > 0) || !(h > 0) || !Number.isFinite(w) || !Number.isFinite(h)) return null
+  return [x, y, w, h]
+}
+
+/** Parser-based root geometry (fail-closed, DOM-free, no fetch). Never throws. */
+export function parseSvgRootGeometry(text: string): SvgRootGeometry {
+  const invalid: SvgRootGeometry = {
+    widthAttr: null,
+    heightAttr: null,
+    viewBox: null,
+    kind: 'invalid',
+    textureSize: null,
+    viewOrigin: [0, 0],
+  }
+  try {
+    if (typeof text !== 'string' || text.length === 0 || text.length > SVG_GEOMETRY_MAX_CHARS) return invalid
+    const root: { widthAttr: string | null; heightAttr: string | null; viewBoxRaw: string | null; seenSvg: boolean } = {
+      widthAttr: null,
+      heightAttr: null,
+      viewBoxRaw: null,
+      seenSvg: false,
+    }
+    const parser = new Parser(
+      {
+        onopentag(name: string, attribs: Record<string, string>) {
+          if (root.seenSvg) return
+          if (String(name).toLowerCase() !== 'svg') return
+          root.seenSvg = true
+          for (const [rawName, rawValue] of Object.entries(attribs ?? {})) {
+            const lower = String(rawName).toLowerCase()
+            if (lower === 'width' && root.widthAttr === null) root.widthAttr = String(rawValue ?? '')
+            else if (lower === 'height' && root.heightAttr === null) root.heightAttr = String(rawValue ?? '')
+            else if (lower === 'viewbox' && root.viewBoxRaw === null) root.viewBoxRaw = String(rawValue ?? '')
+          }
+        },
+      },
+      { xmlMode: true, decodeEntities: true, lowerCaseTags: false, lowerCaseAttributeNames: false },
+    )
+    parser.write(text)
+    parser.end()
+    if (!root.seenSvg) return invalid
+    const widthAttr = root.widthAttr
+    const heightAttr = root.heightAttr
+    const viewBox = svgGeometryViewBox(root.viewBoxRaw)
+    const absoluteW = svgGeometryAbsoluteLength(widthAttr)
+    const absoluteH = svgGeometryAbsoluteLength(heightAttr)
+    let kind: SvgRootKind
+    if (absoluteW != null && absoluteH != null) kind = 'explicit-absolute'
+    else if ((widthAttr != null && widthAttr.includes('%')) || (heightAttr != null && heightAttr.includes('%'))) kind = 'percent'
+    else if (viewBox) kind = 'viewBox-only'
+    else kind = 'missing-dims'
+    const textureSize: [number, number] | null = viewBox
+      ? [viewBox[2], viewBox[3]]
+      : absoluteW != null && absoluteH != null
+        ? [absoluteW, absoluteH]
+        : null
+    return {
+      widthAttr,
+      heightAttr,
+      viewBox,
+      kind,
+      textureSize,
+      viewOrigin: viewBox ? [viewBox[0], viewBox[1]] : [0, 0],
+    }
+  } catch {
+    return invalid
+  }
+}
+
+/** Decode UTF-8 bytes then parse the root geometry. Never throws. */
+export function parseSvgRootGeometryBytes(bytes: Uint8Array): SvgRootGeometry {
+  try {
+    return parseSvgRootGeometry(new TextDecoder().decode(bytes))
+  } catch {
+    return { widthAttr: null, heightAttr: null, viewBox: null, kind: 'invalid', textureSize: null, viewOrigin: [0, 0] }
+  }
+}
+
+/** Upstream-correct SVG texture size from sanitized text (`null` = unknown/getBBox). */
+export function svgTextureSizeFromText(text: string): [number, number] | null {
+  return parseSvgRootGeometry(text).textureSize
+}
+
+/** Upstream-correct SVG texture size from sanitized bytes (`null` = unknown/getBBox). */
+export function svgTextureSizeFromBytes(bytes: Uint8Array): [number, number] | null {
+  return parseSvgRootGeometryBytes(bytes).textureSize
 }
 
 export function loadSvgString(svgString: string, _fromVersion2 = false): SVGSVGElement | { outerHTML: string; viewBox: { baseVal: { x: number; y: number; width: number; height: number } } } {

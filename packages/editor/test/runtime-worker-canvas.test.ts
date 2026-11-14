@@ -47,7 +47,9 @@ describe('runtime worker canvas replacement', () => {
     }
     globalThis.Worker = FakeWorker as unknown as typeof Worker
     const snapshot = { project: { targets: [] } }
-    const vm = { exportAssetBytes: () => ({}), lightweightSnapshot: () => snapshot }
+    // RuntimeVM exposes the full ScratchVM surface: greenFlag captures a
+    // synchronous host snapshot (+ asset bytes) for the flag command.
+    const vm = { exportAssetBytes: () => ({}), lightweightSnapshot: () => snapshot, snapshot: () => snapshot }
     const canvas = { width: 480, height: 360, transferControlToOffscreen: () => ({}) }
     const controller = new RuntimeWorkerController(
       vm as never,
