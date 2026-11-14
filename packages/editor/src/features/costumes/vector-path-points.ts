@@ -2,7 +2,7 @@
 //
 // Gap: `paper-vector.ts` can move editable points and `vector-svg.ts` can move
 // token-based points, but neither can add a point on a curve nor delete one
-// (the reshape entry in scratch-paint-gap-analysis.md). This module fills that
+// (the reshape entry in docs/scratch-paint-gap-analysis.md). This module fills that
 // gap without touching existing files.
 //
 // Interop contract (shared with `paper-vector.ts` / `VectorReshapeOverlay`):

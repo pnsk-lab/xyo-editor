@@ -53,7 +53,7 @@ Handlee、Knewave、Griffy、Source Serif の各上流には OFL 文書がある
 
 ## ライセンス由来の要確認箇所
 
-静的比較では、[bitmap-stamp.ts](packages/editor/src/features/costumes/bitmap-stamp.ts)（旧ビットマップ消しゴムの楕円処理）、[bitmap-eraser.ts](packages/editor/src/features/costumes/bitmap-eraser.ts)、[bitmap-fill.ts](packages/editor/src/features/costumes/bitmap-fill.ts)、[vector-eraser.ts](packages/editor/src/features/costumes/vector-eraser.ts) に参照元からの移植を明記するコメントがあり、一部は変数名や制御構造まで参照コードに近い。特にビットマップ消しゴムの楕円描画とベクター消しゴムのパス分割、走査線塗りつぶしは個別に人のレビューが必要。[THIRD-PARTY.md](packages/editor/THIRD-PARTY.md) には調査時点で scratch-paint の記載がない。AGPL と MIT の配布条件についてここで法的結論は出さないが、配布前に由来と条件を確認すること。
+静的比較では、[bitmap-stamp.ts](../packages/editor/src/features/costumes/bitmap-stamp.ts)（旧ビットマップ消しゴムの楕円処理）、[bitmap-eraser.ts](../packages/editor/src/features/costumes/bitmap-eraser.ts)、[bitmap-fill.ts](../packages/editor/src/features/costumes/bitmap-fill.ts)、[vector-eraser.ts](../packages/editor/src/features/costumes/vector-eraser.ts) に参照元からの移植を明記するコメントがあり、一部は変数名や制御構造まで参照コードに近い。特にビットマップ消しゴムの楕円描画とベクター消しゴムのパス分割、走査線塗りつぶしは個別に人のレビューが必要。[THIRD-PARTY.md](../packages/editor/THIRD-PARTY.md) には調査時点で scratch-paint の記載がない。AGPL と MIT の配布条件についてここで法的結論は出さないが、配布前に由来と条件を確認すること。
 
 ## 今回の修正と検証状況
 
@@ -93,17 +93,17 @@ SVG 数値編集、整列操作、明示的な保存操作、クリックで定�
 12. テキストはインライン編集、フォント一覧、複数行と行間、編集中のショートカット抑止、拡縮時のフォントサイズとビットマップ確定が異なる。
 13. 色は塗り・輪郭の独立設定、第2色の編集、交換、透明／混合状態、スポイトの拡大鏡とアルファが異なる。
 14. ズーム／パンは基準点、増分、ホイール修飾、ビュー境界、チェッカーボードやガイドの表示に差がある。
-15. 履歴は上限、保存形式、編集前後のタイミング、空操作、コスチューム変更時の初期化とサウンド編集との分離を確認する必要がある。比較開始時は移動・リサイズ開始時に履歴取得を開始していたが、変更が成立した場合に記録する方式に改めた。Scratch の移動も変更が発生した場合に更新する（[移動](.tmp/scratch-editor/packages/scratch-paint/src/helper/selection-tools/move-tool.js)、[履歴](.tmp/scratch-editor/packages/scratch-paint/src/helper/undo.js)）。
+15. 履歴は上限、保存形式、編集前後のタイミング、空操作、コスチューム変更時の初期化とサウンド編集との分離を確認する必要がある。比較開始時は移動・リサイズ開始時に履歴取得を開始していたが、変更が成立した場合に記録する方式に改めた。Scratch の移動も変更が発生した場合に更新する（[移動](../.tmp/scratch-editor/packages/scratch-paint/src/helper/selection-tools/move-tool.js)、[履歴](../.tmp/scratch-editor/packages/scratch-paint/src/helper/undo.js)）。
 16. 入出力は SVG のサニタイズ、描画境界、座標・倍率・回転中心、空画像、PNG の解像度、モード切替と画像埋込みを比較する必要がある。
 17. UI はモード別のコントロール、サイズの初期値と上限、グループ化・重なり順の有効条件、狭い幅、翻訳・RTL とフォーカスを比較する必要がある。
 18. 画像のブラシ・消しゴムの表示はスタンプの画素形状とアンチエイリアス、整数座標への丸め、カーソル表示、ズームを比較する必要がある。
-19. 塗りと輪郭の第2色・グラデーション・2色交換を追加した。選択図形の MIXED 表示と部分的な色変更も追加したが、未解決の色表現は変更せず通知する。参照は [fill-style](.tmp/scratch-editor/packages/scratch-paint/src/reducers/fill-style.js) と [stroke-style](.tmp/scratch-editor/packages/scratch-paint/src/reducers/stroke-style.js) を分離している。
+19. 塗りと輪郭の第2色・グラデーション・2色交換を追加した。選択図形の MIXED 表示と部分的な色変更も追加したが、未解決の色表現は変更せず通知する。参照は [fill-style](../.tmp/scratch-editor/packages/scratch-paint/src/reducers/fill-style.js) と [stroke-style](../.tmp/scratch-editor/packages/scratch-paint/src/reducers/stroke-style.js) を分離している。
 20. 透明色の選択、透明ストップの補間色、ビットマップスポイトでの透明画素の扱いを追加した。ベクタースポイトも追加した。放射グラデーションのクリック位置やスポイト表示の詳細には差が残る。
-21. 外部 SVG の取り込みは、VM 側の正規表現サニタイズを回避した入力がエディターの HTML プレビューで実行されることを、無害なマーカーを使うブラウザーテストで確認した。エディターの表示・Paper 読込境界に DOMPurify ベースの防御、VM の保存時にパーサーベースの防御を追加した。独立監査で見つかった CSS 属性の外部 URL と image-set による通信も遮断し、ブラウザーテストを追加した。VM 側の独立監査で再現された `image-set` 経由の外部通信も遮断し、保存後のバイト列とブラウザー通信を回帰テストした。同梱 Scratch SVG 785件すべてについて、240×180 にレンダリングした RGBA 画素を実 Chrome で処理前後比較し、VM・エディター・連続処理の各経路で完全一致した。このサイズと素材に限る検証であり、未知のSVG全般を保証するものではない。VM は作業用 `data-paper-data` を削除する（785件中76件）。見本で描画差はなかったが、エディター側でも不正な Paper データを除去し、直接 import、SVGからのビットマップ変換、ベクター貼付の経路にサニタイズを追加した。変換されたグループや既存図形の保持をブラウザーテストで確認した。サンプル検査であり、未知の入力全般の安全性や互換性を網羅的に保証するものではない。参照は [paper-canvas](.tmp/scratch-editor/packages/scratch-paint/src/containers/paper-canvas.jsx) でサニタイズと分離処理を行う。全経路の安全性が確認できるまで、不明な出所の SVG／プロジェクトを開かないこと。
+21. 外部 SVG の取り込みは、VM 側の正規表現サニタイズを回避した入力がエディターの HTML プレビューで実行されることを、無害なマーカーを使うブラウザーテストで確認した。エディターの表示・Paper 読込境界に DOMPurify ベースの防御、VM の保存時にパーサーベースの防御を追加した。独立監査で見つかった CSS 属性の外部 URL と image-set による通信も遮断し、ブラウザーテストを追加した。VM 側の独立監査で再現された `image-set` 経由の外部通信も遮断し、保存後のバイト列とブラウザー通信を回帰テストした。同梱 Scratch SVG 785件すべてについて、240×180 にレンダリングした RGBA 画素を実 Chrome で処理前後比較し、VM・エディター・連続処理の各経路で完全一致した。このサイズと素材に限る検証であり、未知のSVG全般を保証するものではない。VM は作業用 `data-paper-data` を削除する（785件中76件）。見本で描画差はなかったが、エディター側でも不正な Paper データを除去し、直接 import、SVGからのビットマップ変換、ベクター貼付の経路にサニタイズを追加した。変換されたグループや既存図形の保持をブラウザーテストで確認した。サンプル検査であり、未知の入力全般の安全性や互換性を網羅的に保証するものではない。参照は [paper-canvas](../.tmp/scratch-editor/packages/scratch-paint/src/containers/paper-canvas.jsx) でサニタイズと分離処理を行う。全経路の安全性が確認できるまで、不明な出所の SVG／プロジェクトを開かないこと。
 22. 描画履歴は最大100件・容量制限付きに変更し、コスチューム切替時にクリアする。保存形式や容量上限と、選択状態の復元には差が残る。
 
 ## 主な根拠
 
-- 参照実装: [ベクター矩形](.tmp/scratch-editor/packages/scratch-paint/src/helper/tools/rect-tool.js)、[ビットマップ塗り](.tmp/scratch-editor/packages/scratch-paint/src/helper/bit-tools/fill-tool.js)、[ビットマップ処理](.tmp/scratch-editor/packages/scratch-paint/src/helper/bitmap.js)、[コピー／貼付](.tmp/scratch-editor/packages/scratch-paint/src/hocs/copy-paste-hoc.jsx)、[ショートカット](.tmp/scratch-editor/packages/scratch-paint/src/hocs/keyboard-shortcuts-hoc.jsx)、[ペイント UI](.tmp/scratch-editor/packages/scratch-paint/src/components/paint-editor/paint-editor.jsx)。
-- 現行: [Editor.svelte](packages/editor/src/Editor.svelte)、[BitmapEditor.svelte](packages/editor/src/features/CostumeEditor/BitmapEditor.svelte)、[ベクター操作](packages/editor/src/features/costumes/paper-vector.ts)、[ビットマップ塗り](packages/editor/src/features/costumes/bitmap-fill.ts)、[図形ドラッグ](packages/editor/src/features/costumes/shape-drag.ts)。
+- 参照実装: [ベクター矩形](../.tmp/scratch-editor/packages/scratch-paint/src/helper/tools/rect-tool.js)、[ビットマップ塗り](../.tmp/scratch-editor/packages/scratch-paint/src/helper/bit-tools/fill-tool.js)、[ビットマップ処理](../.tmp/scratch-editor/packages/scratch-paint/src/helper/bitmap.js)、[コピー／貼付](../.tmp/scratch-editor/packages/scratch-paint/src/hocs/copy-paste-hoc.jsx)、[ショートカット](../.tmp/scratch-editor/packages/scratch-paint/src/hocs/keyboard-shortcuts-hoc.jsx)、[ペイント UI](../.tmp/scratch-editor/packages/scratch-paint/src/components/paint-editor/paint-editor.jsx)。
+- 現行: [Editor.svelte](../packages/editor/src/Editor.svelte)、[BitmapEditor.svelte](../packages/editor/src/features/CostumeEditor/BitmapEditor.svelte)、[ベクター操作](../packages/editor/src/features/costumes/paper-vector.ts)、[ビットマップ塗り](../packages/editor/src/features/costumes/bitmap-fill.ts)、[図形ドラッグ](../packages/editor/src/features/costumes/shape-drag.ts)。
 - 比較時の初期型検査は5エラー（ベクター消しゴムの Paper 型3件、定数の import 1件、コンポーネント props 1件）。これは作業開始前の未コミット変更を含む状態で観測された。

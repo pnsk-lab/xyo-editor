@@ -5,7 +5,7 @@ import type { Browser, Page } from 'playwright-core'
 import { launchBrowser } from './browser-launcher'
 
 // Fail-first coverage for the high-priority paint-toolbar gaps recorded in
-// `scratch-paint-toolbar-matrix.md` (T-1 brush size, T-3 stroke width, T-4
+// `docs/scratch-paint-toolbar-matrix.md` (T-1 brush size, T-3 stroke width, T-4
 // fill/stroke disabled conditions).
 //
 // Reference behavior (read from `.tmp/scratch-editor/...`, no code copied):
