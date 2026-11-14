@@ -98,6 +98,7 @@
     "typescript": "~6.0.2"
   },
   "dependencies": {
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "htmlparser2": "^10.1.0"
   }
 }

@@ -12,6 +12,8 @@ The editor bundles or loads the following third-party components.
 | `svelte` | MIT | <https://github.com/sveltejs/svelte> |
 | `lucide-svelte` | ISC | <https://github.com/lucide-icons/lucide> |
 | `fflate` | MIT | <https://github.com/101arrowz/fflate> |
+| `dompurify` | MPL-2.0 OR Apache-2.0 | Used for SVG sanitization (`src/features/costumes/svg-sanitize.ts`). The installed `dompurify@3.4.17` package declares `(MPL-2.0 OR Apache-2.0)` and ships `LICENSE` (Apache-2.0 text) plus `LICENSE-MPL` (MPL-2.0 text): <https://github.com/cure53/DOMPurify> |
+| `htmlparser2` (via `@hikkaku/vm`) | MIT | Used for SVG parsing in `@hikkaku/vm`. Its installed `package.json` declares `MIT`: <https://github.com/fb55/htmlparser2>. Transitive dependencies observed in `pnpm-lock.yaml` are `domelementtype` / `domhandler` / `domutils` / `entities` (installed `package.json` files declare `BSD-2-Clause`) and `dom-serializer` (installed `package.json` declares `MIT`). |
 | `xyo-cpp` (via `@hikkaku/xyo-cpp-wasm`) | MIT | Copyright (c) 2026 kicky1618. See `packages/xyo-cpp-wasm/LICENSE.upstream`. The upstream project lists additional third-party components. |
 
 ## Loaded at runtime (not distributed)

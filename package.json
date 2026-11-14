@@ -11,6 +11,7 @@
     "test:compat": "pnpm --filter @hikkaku/vm test:compat",
     "test:performance": "pnpm --filter @hikkaku/vm test:performance",
     "test:browser": "pnpm --filter xyo-editor test:browser",
+    "test:paint": "pnpm --filter xyo-editor test:paint",
     "test:visual": "pnpm --filter xyo-editor test:visual",
     "fmt": "vp check --fix",
     "lint": "vp check"

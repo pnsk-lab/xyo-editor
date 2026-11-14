@@ -9,6 +9,19 @@
   button:disabled {
     cursor: not-allowed;
   }
+
+  /* Icon-button contract shared by BitmapEditor and PaintToolbarOverflow:
+   * BitmapEditor defines `.toolbar-icon` in its scoped `<style>`, which
+   * never reaches the overflow component, so inline More-list buttons
+   * collapsed to their 20px SVG content. One global rule keeps every
+   *  toolbar icon a 32px target (>=24px WCAG minimum) at all widths. */
+  .toolbar-icon {
+    display: inline-flex;
+    height: 2rem;
+    width: 2rem;
+    align-items: center;
+    justify-content: center;
+  }
 }
 
 html,
@@ -68,15 +81,126 @@ body {
   overflow: hidden;
 }
 
+/* Responsive editor shell (layout-only, no paint/vector logic).
+ * Mobile/tablet (<1024px): stack workspace above stage and scroll the shell
+ * vertically. The old `minmax(0, 1fr) / auto` pair let a tall stage steal
+ * every pixel (workspace collapsed to 0px, paint surface height 0, tabs
+ * covered by the stage so Costumes/More were unreachable). Both rows are
+ * `auto` now with a guaranteed workspace minimum, so editor + stage stay
+ * reachable via shell scroll and nothing hides under sticky overlays.
+ */
 .editor-shell {
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-rows: auto auto;
+  overflow-y: auto;
+  overflow-x: clip;
+  overscroll-behavior-y: contain;
+  scrollbar-gutter: stable;
+}
+
+[data-testid='editor-workspace'] {
+  min-height: 32rem;
+}
+
+[data-testid='stage-pane'] {
+  overflow: visible;
 }
 
 @media (min-width: 1024px) {
   .editor-shell {
     grid-template-columns: minmax(420px, 1fr) 8px var(--stage-pane-width, 540px);
     grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    overscroll-behavior-y: auto;
+    scrollbar-gutter: auto;
+  }
+
+  [data-testid='editor-workspace'] {
+    min-height: 0;
+  }
+
+  [data-testid='stage-pane'] {
+    overflow: hidden;
+  }
+}
+
+/* Responsive paint layout (narrow <640px, e.g. 390px phones).
+ * Layout-only overrides: the 145px costume rail + 132px two-column tool rail
+ * left ~98px for the canvas at 390px. Below 640px the costume rail narrows
+ * to an icon strip (thumbnails + selected number stay visible, rename stays
+ * reachable but compact) and the tool rail collapses to one compact column,
+ * returning ~150px to the canvas (>=240px at 390px). Desktop (>=640px, in
+ * particular the 1104px goal) is untouched: every rule below is scoped to
+ * `max-width: 639px`. No paint/vector/drag logic is affected.
+ */
+@media (max-width: 639px) {
+  /* Costume/sound rail: 145px -> 68px icon strip. */
+  [data-testid='editor-workspace'] > div > aside {
+    width: 4.25rem !important;
+  }
+  [data-testid^='costume-card-'],
+  [data-testid^='sound-card-'] {
+    padding: 0.25rem !important;
+  }
+  /* Thumbnail stays clearly tappable (40px) with the selected number above. */
+  [data-testid^='costume-card-'] > button[aria-label^='Select'],
+  [data-testid^='sound-card-'] > button[aria-label^='Select'] {
+    height: 2.5rem !important;
+  }
+  /* Rename stays available but compact; size line hides to save height. */
+  [data-testid^='costume-card-'] > input,
+  [data-testid^='sound-card-'] > input {
+    font-size: 0.625rem !important;
+    padding: 0 0.15rem !important;
+  }
+  [data-testid^='costume-card-'] > p,
+  [data-testid^='sound-card-'] > p {
+    display: none !important;
+  }
+  /* Keep the delete badge and quick-add badge inside the narrow strip. */
+  [data-testid^='costume-card-'] > button[aria-label^='Delete'],
+  [data-testid^='sound-card-'] > button[aria-label^='Delete'] {
+    height: 1.5rem !important;
+    width: 1.5rem !important;
+    right: 0 !important;
+    top: 0 !important;
+  }
+  /* The quick-add "+" badge is 21.6px by default: keep every narrow touch
+   * target >=24px (WCAG 2.2 minimum). */
+  [data-testid='editor-workspace'] > div > aside .asset-add-quick {
+    height: 1.5rem !important;
+    width: 1.5rem !important;
+    right: -0.25rem !important;
+    top: -0.25rem !important;
+  }
+
+  /* Tool rail: 132px two-column -> 56px one compact column. Buttons stay
+   * 40px (>=24px WCAG target) and the rail scrolls instead of clipping. */
+  [data-testid='paint-tool-rail'] {
+    width: 3.5rem !important;
+    grid-template-columns: repeat(1, minmax(0, 1fr)) !important;
+    column-gap: 0 !important;
+    row-gap: 0.5rem !important;
+    padding: 0.5rem !important;
+    justify-items: center !important;
+    overflow-y: auto !important;
+    overscroll-behavior-y: contain !important;
+  }
+  [data-testid='paint-tool-rail'] > button {
+    height: 2.5rem !important;
+    width: 2.5rem !important;
+  }
+
+  /* Toolbar/footer breathing room at 390px: less side padding, wrap. */
+  [data-testid='paint-toolbar'] {
+    padding-left: 0.5rem !important;
+    padding-right: 0.5rem !important;
+  }
+  [data-testid='paint-footer'] {
+    flex-wrap: wrap !important;
+    row-gap: 0.5rem !important;
+    padding-top: 0.5rem !important;
+    padding-bottom: 0.5rem !important;
   }
 }
 

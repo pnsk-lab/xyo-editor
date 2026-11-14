@@ -30,16 +30,19 @@
     "pack:llvm": "bun scripts/pack-llvm-artifacts.mjs",
     "test:unit": "bun scripts/run-unit-tests.ts",
     "test:browser": "pnpm build && bun test test/editor-conformance.test.ts test/plugin-editor.browser.test.ts",
+    "test:paint": "bun scripts/run-paint-browser-tests.ts",
+    "test:paint:smoke": "bun scripts/run-paint-browser-tests.ts --select smoke",
     "test:visual": "pnpm build && bun test test/editor-conformance.test.ts"
   },
   "dependencies": {
     "blockly": "^12.5.1",
+    "dompurify": "^3.4.17",
     "paper": "^0.12.18"
   },
   "devDependencies": {
     "@hikkaku/llvm-wasm": "workspace:*",
-    "@hikkaku/xyo-cpp-wasm": "workspace:*",
     "@hikkaku/vm": "workspace:*",
+    "@hikkaku/xyo-cpp-wasm": "workspace:*",
     "@sveltejs/vite-plugin-svelte": "^7.1.2",
     "@tailwindcss/vite": "^4.3.0",
     "@tsconfig/svelte": "^5.0.8",
